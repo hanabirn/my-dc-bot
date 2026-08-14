@@ -1,0 +1,401 @@
+import os
+import urllib.request
+import random
+import json
+import glob as glob_mod
+import discord
+from discord.ext import commands
+from ossapi import Ossapi, Mod
+import rosu_pp_py
+from flask import Flask, request, jsonify, render_template_string
+from threading import Thread
+
+# ============ Flask 伺服器 ============
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+@app.route('/maps')
+def maps_page():
+    return render_template_string(MAPS_HTML)
+
+# ============ Flask API 路由 ============
+
+@app.route('/api/maps')
+def api_maps():
+    min_pp = request.args.get('min_pp', 0, type=int)
+    max_pp = request.args.get('max_pp', 9999, type=int)
+    all_maps = load_all_maps()
+    filtered = [m for m in all_maps if min_pp <= m.get('p', 0) <= max_pp]
+    filtered.sort(key=lambda m: m.get('p', 0))
+    
+    # 這裡確保把 JSON 檔案裡的 title, artist, version 完整帶給前端網頁
+    results = []
+    for m in filtered[:100]:  # 最多顯示前 100 筆
+        results.append({
+            "b": m.get("b"), 
+            "s": m.get("s", 0), 
+            "p": m.get("p", 0), 
+            "m": m.get("m", "NoMod"),
+            "title": m.get("title"),
+            "artist": m.get("artist"),
+            "version": m.get("version")
+        })
+    return jsonify(results)
+
+
+# ============ 網頁 HTML 模板 ============
+MAPS_HTML = """
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PP Farm 圖庫搜尋</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; padding: 20px; }
+  h1 { text-align: center; color: #ff66aa; margin-bottom: 20px; }
+  .search-box { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .search-box input { padding: 10px 15px; border: 2px solid #ff66aa; border-radius: 8px;
+    background: #16213e; color: #eee; font-size: 16px; width: 150px; text-align: center; }
+  .search-box button { padding: 10px 25px; border: none; border-radius: 8px;
+    background: #ff66aa; color: #fff; font-size: 16px; cursor: pointer; font-weight: bold; }
+  .search-box button:hover { background: #ff8ec4; }
+  table { width: 100%; border-collapse: collapse; max-width: 900px; margin: 0 auto; }
+  th { background: #16213e; color: #ff66aa; padding: 12px; text-align: left; border-bottom: 2px solid #ff66aa; }
+  td { padding: 10px 12px; border-bottom: 1px solid #333; vertical-align: middle; }
+  tr:hover { background: #16213e; }
+  .cover { width: 80px; height: 45px; object-fit: cover; border-radius: 4px; }
+  .song-link { color: #ff66aa; text-decoration: none; font-weight: bold; }
+  .song-link:hover { text-decoration: underline; }
+  .mod-badge { background: #ff66aa; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 13px; }
+  .pp-val { color: #ffd700; font-weight: bold; }
+  .info { text-align: center; color: #888; margin-top: 15px; }
+  .loading { text-align: center; color: #ff66aa; display: none; margin: 20px; }
+</style>
+</head>
+<body>
+<h1>PP Farm 圖庫搜尋</h1>
+<div class="search-box">
+  <input type="number" id="minPP" placeholder="最小 PP" value="200">
+  <input type="number" id="maxPP" placeholder="最大 PP" value="300">
+  <button onclick="searchMaps()">搜尋</button>
+</div>
+<div class="loading" id="loading">搜尋中...</div>
+<div class="info" id="info"></div>
+<table>
+  <thead>
+    <tr><th>封面</th><th>地圖連結 (歌名)</th><th>PP</th><th>Mod</th></tr>
+  </thead>
+  <tbody id="results"></tbody>
+</table>
+
+<script>
+function searchMaps() {
+  const min = document.getElementById('minPP').value || 0;
+  const max = document.getElementById('maxPP').value || 9999;
+  const tbody = document.getElementById('results');
+  const loading = document.getElementById('loading');
+  const info = document.getElementById('info');
+  tbody.innerHTML = '';
+  info.textContent = '';
+  loading.style.display = 'block';
+  
+  fetch(`/api/maps?min_pp=${min}&max_pp=${max}`)
+    .then(r => r.json())
+    .then(data => {
+      loading.style.display = 'none';
+      info.textContent = `找到 ${data.length} 張地圖 (最多顯示前 100 筆)`;
+      
+      data.forEach(m => {
+        const coverUrl = m.s ? `https://assets.ppy.sh/beatmaps/${m.s}/covers/cover.jpg` : '';
+        const href = `https://osu.ppy.sh/b/${m.b}`;
+        
+        // 核心邏輯：如果 JSON 檔裡有完整的 title 就拿來做為超連結文字！
+        let displayName = `前往地圖頁面 (ID: ${m.b})`;
+        if (m.title) {
+          const artist = m.artist ? `${m.artist} - ` : '';
+          const version = m.version ? ` [${m.version}]` : '';
+          displayName = `${artist}${m.title}${version}`;
+        }
+        
+        tbody.innerHTML += `<tr>
+          <td>${coverUrl ? `<img class="cover" src="${coverUrl}" onerror="this.style.display='none'">` : '無封面'}</td>
+          <td><a class="song-link" href="${href}" target="_blank">${displayName}</a></td>
+          <td class="pp-val">${m.p} pp</td>
+          <td><span class="mod-badge">${m.m}</span></td>
+        </tr>`;
+      });
+    });
+}
+searchMaps();
+</script>
+</body>
+</html>
+"""
+
+# ============ 環境變數 ============
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+if not DISCORD_TOKEN:
+    raise RuntimeError("請設定 DISCORD_TOKEN 環境變數")
+OSU_CLIENT_ID = int(os.getenv("OSU_CLIENT_ID", "62697"))
+OSU_CLIENT_SECRET = os.getenv("OSU_CLIENT_SECRET", "wtUO5Tf8P0NMtIwC68IZsbC07oQwQG91aoIDWOed")
+
+# ============ 初始化 ============
+osu_api = Ossapi(OSU_CLIENT_ID, OSU_CLIENT_SECRET)
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+if not os.path.exists("maps"):
+    os.makedirs("maps")
+
+# ============ 工具函式 ============
+def load_all_maps():
+    all_maps = []
+    seen = set()
+    for path in sorted(glob_mod.glob("maps_*.json")):
+        with open(path, "r", encoding="utf-8") as f:
+            for m in json.load(f):
+                b = m.get("b")
+                if b not in seen:
+                    seen.add(b)
+                    all_maps.append(m)
+    return all_maps
+
+def fetch_beatmap_info(beatmap_id):
+    if not hasattr(fetch_beatmap_info, "cache"):
+        fetch_beatmap_info.cache = {}
+    if beatmap_id in fetch_beatmap_info.cache:
+        return fetch_beatmap_info.cache[beatmap_id]
+    try:
+        bm = osu_api.beatmap(beatmap_id)
+        bs = bm.beatmapset()
+        info = {
+            "artist": bs.artist,
+            "title": bs.title,
+            "version": bm.version,
+            "star_rating": bm.difficulty_rating,
+            "bpm": bs.bpm,
+            "length": bm.total_length,
+        }
+        fetch_beatmap_info.cache[beatmap_id] = info
+        return info
+    except Exception:
+        return None
+
+# ============ Discord Bot 指令 ============
+@bot.event
+async def on_ready():
+    print(f"PP查詢員已上線：{bot.user}")
+
+@bot.command()
+async def ping(ctx):
+    await ctx.send("pong! 🏓")
+
+# --- 1. 預估 PP 查詢指令 (!acc) ---
+@bot.command()
+async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = ""):
+    await ctx.send("⏳ 正在計算中，請稍候...")
+    map_path = f"maps/{beatmap_id}.osu"
+    if not os.path.exists(map_path):
+        try:
+            url = f"https://osu.ppy.sh/osu/{beatmap_id}"
+            urllib.request.urlretrieve(url, map_path)
+        except:
+            return await ctx.send(f"❌ 無法下載地圖 ID {beatmap_id}。")
+
+    try:
+        beatmap = osu_api.beatmap(beatmap_id)
+        mods_value = 0
+        if mods_str:
+            cleaned_str = mods_str.upper().strip()
+            mods_list = [cleaned_str[i:i+2] for i in range(0, len(cleaned_str), 2)]
+            for m in mods_list:
+                if hasattr(Mod, m):
+                    mods_value |= getattr(Mod, m).value
+                else:
+                    return await ctx.send(f"❌ 找不到 Mod: `{m}`")
+
+        parsed_map = rosu_pp_py.Beatmap(path=map_path)
+        calculator = rosu_pp_py.Performance(accuracy=accuracy, mods=mods_value)
+        result = calculator.calculate(parsed_map)
+
+        embed = discord.Embed(
+            title=f"{beatmap.beatmapset().artist} - {beatmap.beatmapset().title}",
+            url=f"https://osu.ppy.sh/b/{beatmap_id}",
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        embed.add_field(name="難度名稱", value=beatmap.version, inline=False)
+        embed.add_field(name="指定 Mod", value=mods_str.upper() if mods_str else "No Mod", inline=True)
+        embed.add_field(name="指定 Accuracy", value=f"{accuracy}%", inline=True)
+        embed.add_field(name="預估 PP", value=f"**{result.pp:.2f} pp**", inline=False)
+        embed.set_footer(text="HANABI PP 計算系統")
+
+        try:
+            acc_s_id = beatmap.beatmapset_id
+            if acc_s_id:
+                embed.set_image(url=f"https://assets.ppy.sh/beatmaps/{acc_s_id}/covers/cover.jpg?v={random.random()}")
+        except Exception as img_err:
+            print(f"acc 圖片獲取失敗: {img_err}")
+
+        await ctx.send(embed=embed)
+    except Exception as e:
+        print(e)
+        await ctx.send("❌ 計算過程中發生錯誤。")
+
+# --- 2. 分類毒瘤抽圖指令 (!rec) ---
+@bot.command()
+async def rec(ctx, target_pp: str):
+    """
+    用法:
+      !rec 400        → 隨機抽一張 ~400pp 的圖
+      !rec 200-300    → 列出 200~300pp 的所有圖（最多 10 張，每張皆含橫幅）
+    """
+    # --- 新用法：範圍搜尋 ---
+    if "-" in target_pp:
+        try:
+            parts = target_pp.split("-")
+            min_pp, max_pp = int(parts[0]), int(parts[1])
+        except ValueError:
+            return await ctx.send("❌ 格式錯誤，請用 `!rec 最小PP-最大PP`，例如 `!rec 200-300`")
+
+        await ctx.send(f"🔍 正在搜尋 {min_pp}~{max_pp}pp 的地圖...")
+
+        # 範圍搜尋模式
+        all_maps = load_all_maps()
+        suitable = [m for m in all_maps if min_pp <= m.get('p', 0) <= max_pp]
+
+        if not suitable:
+            return await ctx.send(f"😢 找不到 {min_pp}~{max_pp}pp 範圍內的地圖。")
+
+        # 【修正點 1】先徹底打亂符合條件的清單，再抽取前 10 張，保證每次都隨機
+        random.shuffle(suitable)
+        shown = suitable[:10]
+
+        # 【修正版】建立一個 Embed 列表，改用 Thumbnail 避免被 Discord 合併圖片
+        embeds = []
+        
+        for index, m in enumerate(shown):
+            b_id = m['b']
+            s_id = m['s']
+            pp = m['p']
+            mod = m['m']
+            
+            # 即時抓歌名
+            info = fetch_beatmap_info(b_id)
+            if info:
+                name = f"{info['artist']} - {info['title']} [{info['version']}]"
+            else:
+                name = f"Beatmap {b_id}"
+                
+            # 每張圖獨立建一個 Embed
+            emb = discord.Embed(
+                title=f"#{index + 1} | {pp}pp | Mod: {mod}",
+                description=f"🎵 **[{name}](https://osu.ppy.sh/b/{b_id})**",
+                color=discord.Color.from_rgb(255, 102, 170)
+            )
+            
+            # 【關鍵修改】改用 set_thumbnail，讓圖片顯示在右側小框，防止被 Discord 合併
+            if s_id:
+                emb.set_thumbnail(url=f"https://assets.ppy.sh/beatmaps/{s_id}/covers/list.jpg")
+            
+            # 在最後一張 Embed 放上 Footer 提示
+            if index == len(shown) - 1:
+                emb.set_footer(text=f"共找到 {len(suitable)} 張，隨機顯示其中 {len(shown)} 張 | 網頁版搜尋: /maps")
+                
+            embeds.append(emb)
+
+        # 一次把這組 Embeds (最多10個) 發送出去
+        await ctx.send(embeds=embeds)
+        return
+
+    # --- 舊用法：隨機抽一張 ---
+    try:
+        target_pp_int = int(target_pp)
+    except ValueError:
+        return await ctx.send("❌ 請輸入數字，例如 `!rec 400` 或 `!rec 200-300`")
+
+    level = (target_pp_int // 100) * 100
+    json_path = f"maps_{level}.json"
+
+    await ctx.send(f"🔍 正在從 `{json_path}` 農夫圖庫搜尋 {target_pp_int}pp 左右的推薦地圖...")
+
+    if not os.path.exists(json_path):
+        return await ctx.send(f"❌ 錯誤：目前還沒建立 {level}pp 級距的地圖庫檔案（找不到 `{json_path}`）。")
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            raw_maps_data = json.load(f)
+
+        if not raw_maps_data:
+            return await ctx.send(f"😢 檔案 `{json_path}` 裡面目前沒有任何地圖數據。")
+
+        seen_ids = set()
+        maps_data = []
+        for m in raw_maps_data:
+            b_id = m.get('b')
+            if b_id not in seen_ids:
+                seen_ids.add(b_id)
+                maps_data.append(m)
+
+        suitable_maps = [m for m in maps_data if (target_pp_int - 10) <= m.get('p', 0) <= (target_pp_int + 10)]
+
+        if not suitable_maps:
+            suitable_maps = [m for m in maps_data if level <= m.get('p', 0) <= (level + 99)]
+            if not suitable_maps:
+                suitable_maps = maps_data
+                await ctx.send(f"⚠️ 提示：找不到 {target_pp_int}pp 附近的地圖，改從整本 `{json_path}` 中隨機抽選。")
+            else:
+                await ctx.send(f"⚠️ 提示：沒有剛好在 {target_pp_int}±10pp 內的地圖，改從整個 {level}pp 庫中隨機抽選。")
+
+        chosen_map = random.choice(suitable_maps)
+        b_id = chosen_map.get('b')
+        s_id = chosen_map.get('s')
+        mods_used = chosen_map.get('m', 'NoMod')
+        avg_pp = chosen_map.get('p', 0)
+
+        embed = discord.Embed(
+            title=f"✨ 幫你找到一張 {avg_pp}pp 左右的農夫圖囉！",
+            description=f"🎵 **[點我直接前往該地圖的 osu! 官網頁面](https://osu.ppy.sh/b/{b_id})**",
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        embed.add_field(name="地圖 ID (Beatmap ID)", value=f"`{b_id}`", inline=True)
+        embed.add_field(name="推薦搭配 Mod", value=f"`{mods_used.upper()}`", inline=True)
+        embed.add_field(name="預估 PP ", value=f"`{avg_pp} pp`", inline=True)
+
+        if s_id:
+            banner_url = f"https://assets.ppy.sh/beatmaps/{s_id}/covers/cover.jpg?v={random.random()}"
+            embed.set_image(url=banner_url)
+            embed.set_footer(text=f"數據來源：本地 {level}pp 專屬分類庫")
+        else:
+            embed.set_footer(text=f"數據來源：本地 {level}pp 專屬分類庫 (提示：在 JSON 補上 's' 可解鎖封面大圖)")
+
+        await ctx.send(embed=embed)
+
+    except json.JSONDecodeError:
+        await ctx.send(f"❌ 讀取失敗：`{json_path}` 的 JSON 格式有錯誤，請檢查標點符號。")
+    except Exception as e:
+        print(f"分類推薦讀取失敗: {e}")
+        await ctx.send("❌ 讀取分類地圖數據時發生未知錯誤。")
+
+# ====================================================
+#  補回消失的 keep_alive 區塊 (請加在 bot.run 的上方)
+# ====================================================
+def run():
+    # 這裡的 port 依照你原來的設定，設定為 10000 讓 Render 讀取
+    app.run(host='0.0.0.0', port=10000)
+
+def keep_alive():
+    t = Thread(target=run, daemon=True)
+    t.start()
+
+# ============ 啟動 ============
+# 由 supervisor.py 統一啟動時（SUPERVISED=1），健康檢查改由 supervisor 負責，
+# 避免三隻 bot 各自搶同一個 port 10000
+if not os.getenv("SUPERVISED"):
+    keep_alive()
+bot.run(DISCORD_TOKEN)

@@ -1,0 +1,5 @@
+discord.py
+requests
+ossapi
+rosu-pp-py
+Flask

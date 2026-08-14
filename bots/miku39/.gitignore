@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+userPools.json
+node_modules/

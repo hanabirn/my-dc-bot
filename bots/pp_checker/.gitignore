@@ -1,0 +1,4 @@
+.env
+maps/
+__pycache__/
+*.osu
