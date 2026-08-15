@@ -189,6 +189,23 @@ def fetch_farm_maps(pp_min=None, pp_max=None, mods="NM", mode="osu"):
 async def on_ready():
     print(f"PP查詢員已上線：{bot.user}")
 
+# 指令用法錯誤（缺參數/參數型別錯）預設只會印到 log、使用者完全看不到任何回覆，
+# 補上一個全域錯誤處理，讓打錯指令的人至少會收到用法提示
+COMMAND_USAGE = {
+    'acc': "用法：`!acc [beatmap_id] [accuracy] [mods]`，例如 `!acc 1234567 98.5 HD`",
+    'rec': "用法：`!rec [目標PP]` 或 `!rec [最小PP-最大PP]`，例如 `!rec 400` 或 `!rec 200-300`",
+}
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        usage = COMMAND_USAGE.get(ctx.command.name if ctx.command else None)
+        await ctx.send(f"❌ {usage}" if usage else "❌ 參數格式不正確，請確認輸入的內容。")
+        return
+    print(f"[pp_checker] 未處理的指令錯誤: {error}")
+
 @bot.command()
 async def ping(ctx):
     await ctx.send("pong! 🏓")
