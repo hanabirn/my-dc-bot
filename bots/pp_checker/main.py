@@ -141,8 +141,11 @@ searchMaps();
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise RuntimeError("請設定 DISCORD_TOKEN 環境變數")
-OSU_CLIENT_ID = int(os.getenv("OSU_CLIENT_ID", "62697"))
-OSU_CLIENT_SECRET = os.getenv("OSU_CLIENT_SECRET", "wtUO5Tf8P0NMtIwC68IZsbC07oQwQG91aoIDWOed")
+OSU_CLIENT_ID = os.getenv("OSU_CLIENT_ID")
+OSU_CLIENT_SECRET = os.getenv("OSU_CLIENT_SECRET")
+if not OSU_CLIENT_ID or not OSU_CLIENT_SECRET:
+    raise RuntimeError("請設定 OSU_CLIENT_ID 與 OSU_CLIENT_SECRET 環境變數")
+OSU_CLIENT_ID = int(OSU_CLIENT_ID)
 
 # ============ 初始化 ============
 osu_api = Ossapi(OSU_CLIENT_ID, OSU_CLIENT_SECRET)
