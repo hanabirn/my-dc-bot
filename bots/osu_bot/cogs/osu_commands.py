@@ -886,11 +886,13 @@ class OsuCommands(commands.Cog):
             await ctx.send(embed=error_embed("這個指令只能在伺服器中使用。"))
             return
 
+        # 這隻 bot 只服務單一伺服器（見 bot.py 的 GUILD 設定），所以不需要另外用
+        # ctx.guild.members 過濾——而且這個 bot 沒開 Server Members Intent，
+        # 那份快取幾乎是空的，用它過濾反而會把剛綁定的人也濾掉
         all_users = db.reference('users').get() or {}
-        guild_member_ids = {m.id for m in ctx.guild.members}
         linked = [
             (user_id, user_data) for user_id, user_data in all_users.items()
-            if user_data.get('osu_name') and int(user_id) in guild_member_ids
+            if user_data.get('osu_name')
         ]
 
         if not linked:
