@@ -5,7 +5,33 @@ import json
 import os
 from googleSearch import BEAUTY_IMAGES
 
+import firebase_admin
+from firebase_admin import credentials, db
+from ossapi import Ossapi
+
 DATA_FILE = "userPools.json"
+
+# --- osu! 戰績串接（選用功能）：讀取 Osu Bot 寫進同一個 Firebase 的帳號綁定／排名
+# 資料（見 osu_bot/cogs/osu_commands.py 的 !link、!profile 排名追蹤），讓「bot 運勢」
+# 的抽籤結果偷偷參考最近的 osu! 排名升降。任何一步失敗（沒設定 Firebase/osu API 憑證、
+# 使用者沒綁定、查詢失敗...）都直接停用這個功能、退回完全隨機抽籤，不會影響 MIKU39
+# 原本的抽籤/抽卡/珍藏庫功能。
+_osu_api = None
+try:
+    if not firebase_admin._apps:
+        _env_creds = os.getenv("FIREBASE_CREDENTIALS")
+        if _env_creds:
+            _cred = credentials.Certificate(json.loads(_env_creds))
+            firebase_admin.initialize_app(_cred, {
+                'databaseURL': 'https://osu-discord-bot-56c1d-default-rtdb.firebaseio.com/'
+            })
+    _client_id = os.getenv("OSU_CLIENT_ID")
+    _client_secret = os.getenv("OSU_CLIENT_SECRET")
+    if firebase_admin._apps and _client_id and _client_secret:
+        _osu_api = Ossapi(int(_client_id), _client_secret)
+except Exception as e:
+    print(f"[MIKU39] osu! 戰績串接初始化失敗（將以純隨機運勢繼續運作）: {e}")
+    _osu_api = None
 
 def load_user_data():
     if not os.path.exists(DATA_FILE):
@@ -30,6 +56,45 @@ FORTUNE_LIST = [
     {"type": "💧 凶", "desc": "今天可能會遇到音壓怪或者瘋狂 Miss... 沒關係，早點休息，明天又是新的一天！", "gif": "https://s1.aigei.com/src/img/gif/16/1644ae8483424bfc9c17c770c3d82301.gif"},
     {"type": "⚡ 大凶", "desc": "嗚哇！今天打歌手感不太對勁呢... 快去吃碗大蔥拉麵補充元氣，今天先別強求 pp 了！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"}
 ]
+
+# FORTUNE_LIST 索引對應的好/壞籤（依內容描述分類，不是單純依序排列——
+# 「末吉」描述偏負面，「吉」描述偏正常/正面，所以它們的順序跟字面吉凶不完全一致）
+_GOOD_FORTUNE_INDICES = {0, 1, 2, 4}   # 大吉、中吉、小吉、吉
+_BAD_FORTUNE_INDICES = {3, 5, 6}       # 末吉、凶、大凶
+
+def _get_luck_bias(user_id):
+    """查詢該使用者最近的 osu! 全球排名變化（跟 Osu Bot 的 !profile 共用同一份
+    Firebase last_rank 記錄）。回傳 'up'／'down'／None，None 代表沒綁定、
+    Osu Bot 那邊還沒有比較基準、或查詢失敗——這幾種情況都維持完全隨機抽籤。"""
+    if not _osu_api:
+        return None
+    try:
+        user_data = db.reference(f'users/{user_id}').get()
+        if not user_data or not user_data.get('osu_name'):
+            return None
+        prev_rank = db.reference(f'users/{user_id}/last_rank/osu').get()
+        if not isinstance(prev_rank, int):
+            return None
+        user = _osu_api.user(user_data['osu_name'], mode='osu', key='username')
+        if not user.statistics or user.statistics.global_rank is None:
+            return None
+        current_rank = user.statistics.global_rank
+        if current_rank < prev_rank:
+            return 'up'
+        if current_rank > prev_rank:
+            return 'down'
+        return None
+    except Exception:
+        return None
+
+def _pick_fortune(bias):
+    if bias == 'up':
+        weights = [3 if i in _GOOD_FORTUNE_INDICES else 1 for i in range(len(FORTUNE_LIST))]
+        return random.choices(FORTUNE_LIST, weights=weights, k=1)[0]
+    if bias == 'down':
+        weights = [3 if i in _BAD_FORTUNE_INDICES else 1 for i in range(len(FORTUNE_LIST))]
+        return random.choices(FORTUNE_LIST, weights=weights, k=1)[0]
+    return random.choice(FORTUNE_LIST)
 
 # 🗂️ 珍藏庫互動按鈕 View 類別（含刪除功能）
 class PoolView(discord.ui.View):
@@ -98,13 +163,18 @@ async def handle_miku_commands(message: discord.Message, bot):
 
     # 1. 運勢指令
     if msg_str == "bot 運勢":
-        fortune = random.choice(FORTUNE_LIST)
+        bias = _get_luck_bias(user_id)
+        fortune = _pick_fortune(bias)
         embed = discord.Embed(
             title=f"🎤 Miku39 占卜結果：{fortune['type']}",
             description=fortune['desc'],
             color=discord.Color.from_str("#39C5BB")
         )
         embed.set_image(url=fortune['gif'])
+        if bias == 'up':
+            embed.set_footer(text="💫 偵測到你最近 osu! 排名進步了，運勢也跟著沾光～")
+        elif bias == 'down':
+            embed.set_footer(text="😮‍💨 偵測到你最近 osu! 排名有點退步，Miku 悄悄幫你加油中...")
         await message.reply(embed=embed)
         return True
 
@@ -149,6 +219,20 @@ async def handle_miku_commands(message: discord.Message, bot):
 
         view = PoolView(message.author.id, user_cards)
         await message.reply(embed=view.get_embed(), view=view)
+        return True
+
+    # 4. 指令選單
+    elif msg_str in ("bot 選單", "bot help", "bot 指令"):
+        embed = discord.Embed(
+            title="🎤 MIKU39 指令選單",
+            description="以下是目前可以使用的指令：\n──────────────────",
+            color=discord.Color.from_str("#39C5BB")
+        )
+        embed.add_field(name="`bot 運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `!link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
+        embed.add_field(name="`bot 抽卡`", value="隨機抽一張世界第一公主殿下的美圖，可以收藏到珍藏庫", inline=False)
+        embed.add_field(name="`bot 珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
+        embed.set_footer(text="💚 想再看一次這份選單，隨時輸入 bot 選單")
+        await message.reply(embed=embed)
         return True
 
     return False
