@@ -1,8 +1,9 @@
 import os
+import re
 import requests
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from firebase_admin import db
 from ossapi import Ossapi
 
@@ -49,6 +50,40 @@ RANK_ANSI_STRINGS = {
     "C": "[1;33mC[0m",      # 黃色 C
     "D": "[1;31mD[0m"       # 紅色 D
 }
+
+# ========================================================
+# 📢 賽事自動公告：資料來自 osu-花火網頁 的 wyBin／osu! 官方論壇賽事區代理 API
+# （見該網站 netlify/functions/wybin-tournaments.js、osu-tournaments.js），
+# 網址格式跟該網站前端 js/tournaments.js 用的完全一致，避免自己亂猜。
+# ========================================================
+TOURNAMENT_CHANNEL_ID = 1538062072326397982
+WYBIN_TOURNAMENTS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/wybin-tournaments"
+OSU_FORUM_TOURNAMENTS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/osu-tournaments"
+WYBIN_TOURNAMENT_BASE = "https://wybin.xyz/tournaments/"
+WYBIN_UPLOADS_BASE = "https://wybin.xyz/uploads/tournaments/"
+OSU_FORUM_TOPIC_BASE = "https://osu.ppy.sh/community/forums/topics/"
+
+WYBIN_GAMEMODE_NAMES = {0: "⭕ osu!", 1: "🥁 Taiko", 2: "🍎 Catch", 3: "🎹 Mania"}
+
+# 論壇賽事區的 API 沒有結構化的模式欄位，只能從標題慣例猜（例如 "[Taiko] ..."），
+# 跟網站前端 detectTournamentMode() 用同一套規則，順序重要：mania 的 tag 常包含
+# "osu!" 字樣（如 "[osu!mania 4k]"），所以要先比對比較精確的 mania/taiko/catch
+_TOURNAMENT_MODE_PATTERNS = [
+    ("🎹 Mania", re.compile(r"mania", re.I)),
+    ("🥁 Taiko", re.compile(r"taiko", re.I)),
+    ("🍎 Catch", re.compile(r"(catch|ctb)", re.I)),
+    ("⭕ osu!", re.compile(r"\[?\s*(osu!?|std|standard)\s*\]?", re.I)),
+]
+
+def detect_forum_tournament_mode(title):
+    if not title:
+        return None
+    bracket = re.match(r"^\s*\[([^\]]+)\]", title)
+    haystack = bracket.group(1) if bracket else title
+    for name, pattern in _TOURNAMENT_MODE_PATTERNS:
+        if pattern.search(haystack):
+            return name
+    return None
 
 # ========================================================
 # 🛠️ 核心工具函式
@@ -455,6 +490,10 @@ class OsuProfileView(discord.ui.View):
 class OsuCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.check_tournaments.start()
+
+    def cog_unload(self):
+        self.check_tournaments.cancel()
 
     def _lookup_osu_user_id(self, osu_name):
         """依 username 查 osu! user id，查不到就回傳 None（帳號可能改名/不存在）"""
@@ -463,6 +502,121 @@ class OsuCommands(commands.Cog):
             return user.id
         except Exception:
             return None
+
+    # ==================================================
+    # 📢 賽事自動公告：每 30 分鐘檢查一次 wyBin／osu! 論壇賽事區有沒有新賽事，
+    # 有的話發到 TOURNAMENT_CHANNEL_ID。第一次執行只會建立「目前已存在」的基準
+    # 名單、不會發公告，不然剛部署起來就會把上百筆歷史賽事全部洗版發一遍。
+    # ==================================================
+    @tasks.loop(minutes=30)
+    async def check_tournaments(self):
+        try:
+            await self._check_wybin_tournaments()
+        except Exception as e:
+            print(f"[TournamentAnnounce] wyBin 檢查流程發生未預期錯誤: {e}")
+        try:
+            await self._check_forum_tournaments()
+        except Exception as e:
+            print(f"[TournamentAnnounce] 論壇檢查流程發生未預期錯誤: {e}")
+
+    @check_tournaments.before_loop
+    async def before_check_tournaments(self):
+        await self.bot.wait_until_ready()
+
+    async def _check_wybin_tournaments(self):
+        channel = self.bot.get_channel(TOURNAMENT_CHANNEL_ID)
+        if not channel:
+            print(f"[TournamentAnnounce] 找不到頻道 {TOURNAMENT_CHANNEL_ID}")
+            return
+        try:
+            resp = requests.get(WYBIN_TOURNAMENTS_API, timeout=15)
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        except Exception as e:
+            print(f"[TournamentAnnounce] wyBin 查詢失敗: {e}")
+            return
+
+        seen_ref = db.reference('tournament_announce/wybin_seen')
+        seen = seen_ref.get() or {}
+        is_first_run = len(seen) == 0
+        new_items = [item for item in items if str(item.get('id')) not in seen]
+
+        for item in items:
+            seen[str(item.get('id'))] = True
+        seen_ref.set(seen)
+
+        if is_first_run:
+            print(f"[TournamentAnnounce] wyBin 首次執行，建立 {len(items)} 筆基準，不發送公告")
+            return
+
+        for item in reversed(new_items):
+            try:
+                await channel.send(embed=self._build_wybin_embed(item))
+            except Exception as e:
+                print(f"[TournamentAnnounce] 發送 wyBin 公告失敗: {e}")
+
+    async def _check_forum_tournaments(self):
+        channel = self.bot.get_channel(TOURNAMENT_CHANNEL_ID)
+        if not channel:
+            print(f"[TournamentAnnounce] 找不到頻道 {TOURNAMENT_CHANNEL_ID}")
+            return
+        try:
+            resp = requests.get(OSU_FORUM_TOURNAMENTS_API, timeout=15)
+            resp.raise_for_status()
+            topics = resp.json().get("topics", [])
+        except Exception as e:
+            print(f"[TournamentAnnounce] osu! 論壇查詢失敗: {e}")
+            return
+
+        seen_ref = db.reference('tournament_announce/forum_seen')
+        seen = seen_ref.get() or {}
+        is_first_run = len(seen) == 0
+        new_topics = [t for t in topics if str(t.get('id')) not in seen]
+
+        for t in topics:
+            seen[str(t.get('id'))] = True
+        seen_ref.set(seen)
+
+        if is_first_run:
+            print(f"[TournamentAnnounce] osu! 論壇首次執行，建立 {len(topics)} 筆基準，不發送公告")
+            return
+
+        for t in reversed(new_topics):
+            try:
+                await channel.send(embed=self._build_forum_embed(t))
+            except Exception as e:
+                print(f"[TournamentAnnounce] 發送論壇公告失敗: {e}")
+
+    def _build_wybin_embed(self, item):
+        mode_name = WYBIN_GAMEMODE_NAMES.get(item.get('gamemode'), "未標示模式")
+        slug = item.get('slug', '')
+        embed = discord.Embed(
+            title=f"🏆 新賽事公告：{item.get('name') or '未知賽事'}",
+            url=WYBIN_TOURNAMENT_BASE + slug,
+            description=f"**{item.get('acronym', '')}** ｜ {mode_name}",
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        tags = item.get('tags')
+        if tags:
+            embed.add_field(name="標籤", value=tags, inline=False)
+        thumb = item.get('headerImageThumb')
+        if thumb and slug:
+            embed.set_image(url=f"{WYBIN_UPLOADS_BASE}{slug}/{thumb}")
+        embed.set_footer(text="資料來源：wyBin")
+        return embed
+
+    def _build_forum_embed(self, topic):
+        mode_name = detect_forum_tournament_mode(topic.get('title')) or "未標示模式"
+        embed = discord.Embed(
+            title=f"📢 osu! 賽事公告：{topic.get('title') or '未知標題'}",
+            url=OSU_FORUM_TOPIC_BASE + str(topic.get('id')),
+            description=mode_name,
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        embed.add_field(name="💬 回覆數", value=f"{topic.get('post_count', 0)}", inline=True)
+        embed.add_field(name="👁 瀏覽數", value=f"{topic.get('views', 0)}", inline=True)
+        embed.set_footer(text="資料來源：osu! 官方論壇 Tournaments 討論區")
+        return embed
 
     # 1. 指令 !link
     @commands.hybrid_command(name="link", description="綁定你的 osu! 帳號")
