@@ -871,64 +871,100 @@ class OsuCommands(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    # 4. 指令 !leaderboard
-    @commands.hybrid_command(name="leaderboard", aliases=["lb"], description="伺服器四模式綜合 PP 排行榜 Top 10")
-    async def leaderboard(self, ctx):
-        all_users = db.reference('users').get()
-        if not all_users:
-            await ctx.send(embed=error_embed("目前資料庫中沒有任何玩家數據。"))
+    # 4. 指令 !leaderboard（即時抓取伺服器內已綁定成員的最新 osu! 數據，不需要先 !compare 過）
+    @commands.hybrid_command(name="leaderboard", aliases=["lb"], description="伺服器 PP 排行榜 Top 10（即時抓取）")
+    @app_commands.describe(mode="要排序的模式（預設：四模式總和）")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="綜合（四模式總和）", value="total"),
+        app_commands.Choice(name="⭕ osu! Standard", value="osu"),
+        app_commands.Choice(name="🥁 Taiko", value="taiko"),
+        app_commands.Choice(name="🍎 Catch", value="fruits"),
+        app_commands.Choice(name="🎹 Mania", value="mania"),
+    ])
+    async def leaderboard(self, ctx, mode: str = "total"):
+        if not ctx.guild:
+            await ctx.send(embed=error_embed("這個指令只能在伺服器中使用。"))
             return
 
-        leaderboard_list = []
-        for user_id, user_data in all_users.items():
-            osu_name = user_data.get('osu_name', '未知')
-            total_pp = user_data.get('total_pp', 0.0)
-            modes_pp = user_data.get('modes_pp', [0.0, 0.0, 0.0, 0.0])
+        all_users = db.reference('users').get() or {}
+        guild_member_ids = {m.id for m in ctx.guild.members}
+        linked = [
+            (user_id, user_data) for user_id, user_data in all_users.items()
+            if user_data.get('osu_name') and int(user_id) in guild_member_ids
+        ]
 
-            if total_pp > 0:
-                leaderboard_list.append({
-                    'osu_name': osu_name,
-                    'total_pp': total_pp,
-                    'modes_pp': modes_pp
-                })
-
-        if not leaderboard_list:
-            await ctx.send(embed=info_embed("💡 尚未有人進行過 `!compare`，排行榜尚無數據，請先使用 `!compare` 來初始化分數！"))
+        if not linked:
+            await ctx.send(embed=info_embed("目前伺服器中還沒有人使用 `!link` 綁定 osu! 帳號，快來當第一個吧！"))
             return
 
-        leaderboard_list.sort(key=lambda x: x['total_pp'], reverse=True)
+        progress = await ctx.send("⏳ 正在即時讀取伺服器成員的最新 osu! 數據，請稍候...")
+
+        results = []
+        for user_id, user_data in linked:
+            osu_name = user_data['osu_name']
+            try:
+                if mode == "total":
+                    pp_total = 0.0
+                    country = None
+                    for _, (mode_key, _) in OSU_MODES.items():
+                        user = osu_api.user(osu_name, mode=mode_key, key="username")
+                        if user.statistics:
+                            pp_total += user.statistics.pp or 0.0
+                        if country is None:
+                            country = user.country_code
+                    results.append({'osu_name': osu_name, 'pp': pp_total, 'country': country})
+                else:
+                    user = osu_api.user(osu_name, mode=mode, key="username")
+                    pp = (user.statistics.pp or 0.0) if user.statistics else 0.0
+                    results.append({'osu_name': osu_name, 'pp': pp, 'country': user.country_code})
+            except Exception:
+                continue
+
+        if not results:
+            await progress.edit(content=None, embed=error_embed("查詢失敗，找不到任何有效的 osu! 資料，請確認綁定的名稱是否正確。"))
+            return
+
+        results.sort(key=lambda x: x['pp'], reverse=True)
+
+        mode_label = {
+            "total": "綜合（四模式總和）",
+            "osu": "⭕ osu! Standard",
+            "taiko": "🥁 Taiko",
+            "fruits": "🍎 Catch",
+            "mania": "🎹 Mania",
+        }[mode]
 
         embed = discord.Embed(
-            title="🏆 伺服器四模式綜合實力排行榜 (Top 10)",
+            title=f"🏆 伺服器 PP 排行榜（{mode_label}）Top 10",
             color=discord.Color.from_rgb(255, 102, 170),
-            description="本排行依據各成員之 (Std + Taiko + Catch + Mania) 總 PP 加總進行排名。\n──────────────────"
+            description="即時抓取所有已 `!link` 綁定成員的最新 osu! 數據進行排名。\n──────────────────"
         )
 
         lb_text = "```ansi\n"
-        lb_text += "名次 | 玩家名稱           | 綜合總 PP \n"
+        lb_text += "名次 | 玩家名稱           |     PP\n"
         lb_text += "-----+--------------------+-----------\n"
 
-        for index, player in enumerate(leaderboard_list[:10]):
+        for index, player in enumerate(results[:10]):
             rank = index + 1
+            flag = country_flag(player['country'])
             name = player['osu_name']
-            total = player['total_pp']
 
             if rank == 1:
-                rank_str = f"[1;33m🥇 [0m"
+                rank_str = "\x1b[1;33m🥇 \x1b[0m"
             elif rank == 2:
-                rank_str = f"[1;36m🥈 [0m"
+                rank_str = "\x1b[1;36m🥈 \x1b[0m"
             elif rank == 3:
-                rank_str = f"[1;31m🥉 [0m"
+                rank_str = "\x1b[1;31m🥉 \x1b[0m"
             else:
                 rank_str = f"#{rank:<2}"
 
-            lb_text += f"{rank_str} | {name:<18} | {total:>8.1f}\n"
+            lb_text += f"{rank_str} | {flag} {name:<15} | {player['pp']:>8.1f}\n"
 
         lb_text += "```"
         embed.add_field(name="📈 即時排名（前 10 名）", value=lb_text, inline=False)
-        embed.set_footer(text="💡 想讓自己上榜或更新分數嗎？請與任意成員輸入一次 !compare 即可！")
+        embed.set_footer(text="💡 想上榜嗎？先使用 !link 綁定你的 osu! 帳號即可！")
 
-        await ctx.send(embed=embed)
+        await progress.edit(content=None, embed=embed)
 
     # 5. 指令 !collections（查詢在 osu-花火網頁 發布的圖庫收藏，可選：查別人）
     @commands.hybrid_command(name="collections", aliases=["col"], description="查詢在 osu-花火網頁 上發布的圖庫收藏摘要")
@@ -1029,7 +1065,7 @@ class OsuCommands(commands.Cog):
         embed.add_field(name="`!recent [@成員]`（別名 `!rs`）", value="查看最近一次遊玩紀錄，不論有沒有破紀錄、成功或失敗", inline=False)
         embed.add_field(name="`!profile [@成員]`（別名 `!pf`）", value="四模式玩家數據總覽（PP、排名、精準度、命中分佈），一樣可以查別人", inline=False)
         embed.add_field(name="`!compare @成員`（別名 `!c`）", value="跟指定成員比較四模式 PP", inline=False)
-        embed.add_field(name="`!leaderboard`（別名 `!lb`）", value="伺服器四模式綜合 PP 排行榜 Top 10", inline=False)
+        embed.add_field(name="`!leaderboard [模式]`（別名 `!lb`）", value="伺服器 PP 排行榜 Top 10（即時抓取），可指定單一模式，不指定則看四模式總和", inline=False)
         embed.add_field(name="`!collections [@成員]`（別名 `!col`）", value="查詢在 osu-花火網頁 上發布的圖庫收藏摘要，一樣可以查別人", inline=False)
         embed.add_field(name="`!mapper [使用者名稱]`", value="查詢圖主目前的墳場圖／Loved 圖", inline=False)
         embed.set_footer(text="🎀 想再看一次這份選單，隨時輸入 !help")
