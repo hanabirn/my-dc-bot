@@ -1,5 +1,6 @@
 # mikuCommands.py
 import discord
+from discord import app_commands
 import random
 import json
 import os
@@ -206,13 +207,33 @@ class PoolView(discord.ui.View):
         self.current_index = 0 if self.current_index == len(self.card_list) - 1 else self.current_index + 1
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
-async def handle_miku_commands(message: discord.Message, bot):
-    msg_str = message.content.strip()
-    user_id = str(message.author.id)
+# 🎁 抽卡結果的「收藏」按鈕 View（抽到的圖不管來自精選圖庫還是即時抓的新圖都共用同一套）
+class CollectView(discord.ui.View):
+    def __init__(self, url):
+        super().__init__(timeout=60.0)
+        self.url = url
 
-    # 1. 運勢指令
-    if msg_str == "bot 運勢":
-        bias = _get_luck_bias(user_id)
+    @discord.ui.button(label="💖 收藏這張美圖", style=discord.ButtonStyle.success)
+    async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+        data = load_user_data()
+        if uid not in data:
+            data[uid] = []
+        if self.url in data[uid]:
+            await interaction.response.send_message("✨ 這張圖已經在你的珍藏庫裡囉！", ephemeral=True)
+        else:
+            data[uid].append(self.url)
+            save_user_data(data)
+            await interaction.response.send_message("💖 成功將美圖收藏至你的個人珍藏庫！", ephemeral=True)
+
+
+def register_commands(bot):
+    """把 MIKU39 的指令註冊到 bot 上——用 hybrid_command 讓每個指令同時支援
+    原本的 `bot 指令名` 文字前綴跟新的 `/指令名` Slash 介面，兩種叫法共用同一份邏輯。"""
+
+    @bot.hybrid_command(name="運勢", description="抽一次今日運勢籤詩")
+    async def fortune_command(ctx):
+        bias = _get_luck_bias(str(ctx.author.id))
         fortune = _pick_fortune(bias)
         embed = discord.Embed(
             title=f"🎤 Miku39 占卜結果：{fortune['type']}",
@@ -224,13 +245,12 @@ async def handle_miku_commands(message: discord.Message, bot):
             embed.set_footer(text="💫 偵測到你最近 osu! 排名進步了，運勢也跟著沾光～")
         elif bias == 'down':
             embed.set_footer(text="😮‍💨 偵測到你最近 osu! 排名有點退步，Miku 悄悄幫你加油中...")
-        await message.reply(embed=embed)
-        return True
+        await ctx.send(embed=embed)
 
-    # 2. 抽卡指令
-    elif msg_str == "bot 抽卡":
+    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖，可以收藏到珍藏庫")
+    async def gacha_command(ctx):
         # 一半機率嘗試即時從網路抓一張新圖，抓不到（逾時/斷線）就退回精選圖庫，
-        # 確保 bot 抽卡 永遠不會因為外部 API 問題而完全失敗
+        # 確保這個指令永遠不會因為外部 API 問題而完全失敗
         img_url = fetch_random_anime_image() if random.random() < 0.5 else None
         if not img_url:
             curated_pool = BEAUTY_IMAGES + get_custom_images()
@@ -241,83 +261,57 @@ async def handle_miku_commands(message: discord.Message, bot):
             color=discord.Color.from_str("#39C5BB")
         )
         embed.set_image(url=img_url)
+        await ctx.send(embed=embed, view=CollectView(img_url))
 
-        class CollectView(discord.ui.View):
-            def __init__(self, url):
-                super().__init__(timeout=60.0)
-                self.url = url
-            @discord.ui.button(label="💖 收藏這張美圖", style=discord.ButtonStyle.success)
-            async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
-                uid = str(interaction.user.id)
-                data = load_user_data()
-                if uid not in data:
-                    data[uid] = []
-                if self.url in data[uid]:
-                    await interaction.response.send_message("✨ 這張圖已經在你的珍藏庫裡囉！", ephemeral=True)
-                else:
-                    data[uid].append(self.url)
-                    save_user_data(data)
-                    await interaction.response.send_message("💖 成功將美圖收藏至你的個人珍藏庫！", ephemeral=True)
-
-        await message.reply(embed=embed, view=CollectView(img_url))
-        return True
-
-    # 3. 珍藏庫指令
-    elif msg_str == "bot 珍藏庫":
+    @bot.hybrid_command(name="珍藏庫", description="翻看你收藏的美圖")
+    async def collection_command(ctx):
         data = load_user_data()
-        user_cards = data.get(user_id, [])
+        user_cards = data.get(str(ctx.author.id), [])
 
         if not user_cards:
-            await message.reply("💨 你的珍藏庫目前空空如也呢！快使用 `bot 抽卡` 來收集公主殿下的美圖吧！")
-            return True
+            await ctx.send("💨 你的珍藏庫目前空空如也呢！快使用 `/抽卡` 來收集公主殿下的美圖吧！")
+            return
 
-        view = PoolView(message.author.id, user_cards)
-        await message.reply(embed=view.get_embed(), view=view)
-        return True
+        view = PoolView(ctx.author.id, user_cards)
+        await ctx.send(embed=view.get_embed(), view=view)
 
-    # 4. 加圖指令（只有小天地主人能用，見 MIKU_OWNER_ID 環境變數）
-    elif msg_str.startswith("bot 加圖"):
+    @bot.hybrid_command(name="加圖", description="（僅限主人）新增一張圖片網址到精選圖庫")
+    @app_commands.describe(url="圖片網址（需以 http:// 或 https:// 開頭）")
+    async def add_image_command(ctx, url: str):
         owner_id = os.getenv("MIKU_OWNER_ID")
-        if not owner_id or user_id != owner_id:
-            await message.reply("❌ 只有小天地主人才能新增精選圖庫喔！")
-            return True
+        if not owner_id or str(ctx.author.id) != owner_id:
+            await ctx.send("❌ 只有小天地主人才能新增精選圖庫喔！")
+            return
 
-        url = msg_str[len("bot 加圖"):].strip()
-        if not url:
-            await message.reply("❌ 用法：`bot 加圖 [圖片網址]`")
-            return True
         if not (url.startswith("http://") or url.startswith("https://")):
-            await message.reply("❌ 這不是一個有效的網址（必須以 http:// 或 https:// 開頭）")
-            return True
+            await ctx.send("❌ 這不是一個有效的網址（必須以 http:// 或 https:// 開頭）")
+            return
         if not firebase_admin._apps:
-            await message.reply("❌ Firebase 尚未設定好，暫時無法新增圖庫（不影響現有的 bot 抽卡）。")
-            return True
+            await ctx.send("❌ Firebase 尚未設定好，暫時無法新增圖庫（不影響現有的 /抽卡）。")
+            return
 
         custom_images = get_custom_images()
         if url in BEAUTY_IMAGES or url in custom_images:
-            await message.reply("⚠️ 這張圖片網址已經在精選圖庫裡囉！")
-            return True
+            await ctx.send("⚠️ 這張圖片網址已經在精選圖庫裡囉！")
+            return
 
         custom_images.append(url)
         save_custom_images(custom_images)
         total = len(BEAUTY_IMAGES) + len(custom_images)
-        await message.reply(f"💚 成功加入精選圖庫！（目前精選圖庫共 {total} 張，立即生效）")
-        return True
+        await ctx.send(f"💚 成功加入精選圖庫！（目前精選圖庫共 {total} 張，立即生效）")
 
-    # 5. 指令選單
-    elif msg_str in ("bot 選單", "bot help", "bot 指令"):
+    @bot.hybrid_command(name="選單", aliases=["help", "指令"], description="顯示 MIKU39 的指令說明")
+    async def menu_command(ctx):
         embed = discord.Embed(
             title="🎤 MIKU39 指令選單",
             description="以下是目前可以使用的指令：\n──────────────────",
             color=discord.Color.from_str("#39C5BB")
         )
-        embed.add_field(name="`bot 運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `!link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
-        embed.add_field(name="`bot 抽卡`", value="隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫", inline=False)
-        embed.add_field(name="`bot 珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
-        if os.getenv("MIKU_OWNER_ID") and user_id == os.getenv("MIKU_OWNER_ID"):
-            embed.add_field(name="`bot 加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
-        embed.set_footer(text="💚 想再看一次這份選單，隨時輸入 bot 選單")
-        await message.reply(embed=embed)
-        return True
-
-    return False
+        embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
+        embed.add_field(name="`/抽卡`", value="隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫", inline=False)
+        embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
+        owner_id = os.getenv("MIKU_OWNER_ID")
+        if owner_id and str(ctx.author.id) == owner_id:
+            embed.add_field(name="`/加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
+        embed.set_footer(text="💚 想再看一次這份選單，隨時輸入 /選單 或 bot 選單")
+        await ctx.send(embed=embed)

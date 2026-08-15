@@ -10,7 +10,7 @@ from flask import Flask
 import threading
 
 # 保持您原本的導入
-from mikuCommands import handle_miku_commands
+from mikuCommands import register_commands
 from osu_interactions import handle_play_interactions
 
 load_dotenv()
@@ -33,7 +33,12 @@ def run_web_server():
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="bot ", intents=intents)
+bot = commands.Bot(command_prefix="bot ", intents=intents, help_command=None)
+
+# Slash 指令同步到這個伺服器（幾乎立即生效，不用等 Discord 全域同步最長 1 小時的傳播時間）
+GUILD = discord.Object(id=1505477519753609226)
+
+register_commands(bot)
 
 async def handle_osu_message(message: discord.Message):
     await asyncio.sleep(1.5)
@@ -57,6 +62,12 @@ async def handle_osu_message(message: discord.Message):
         print(f"分析 owo 訊息時發生錯誤: {e}")
 
 @bot.event
+async def setup_hook():
+    bot.tree.copy_global_to(guild=GUILD)
+    synced = await bot.tree.sync(guild=GUILD)
+    print(f"✅ 已同步 {len(synced)} 個 Slash 指令到伺服器")
+
+@bot.event
 async def on_ready():
     print(f"💚 世界第一公主殿下 MIKU39 已登入為: {bot.user}")
 
@@ -66,10 +77,7 @@ async def on_message(message: discord.Message):
         await handle_osu_message(message)
         return
 
-    processed = await handle_miku_commands(message, bot)
-    
-    if not processed:
-        await bot.process_commands(message)
+    await bot.process_commands(message)
 
 # === 修改：原本最後一行的 bot.run(TOKEN) 改為以下結構 ===
 if __name__ == "__main__":

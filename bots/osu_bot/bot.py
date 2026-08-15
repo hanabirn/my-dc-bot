@@ -58,6 +58,9 @@ intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+# Slash 指令同步到這個伺服器（幾乎立即生效，不用等 Discord 全域同步最長 1 小時的傳播時間）
+GUILD = discord.Object(id=1505477519753609226)
+
 
 @bot.event
 async def setup_hook():
@@ -66,6 +69,12 @@ async def setup_hook():
         print("✅ 成功載入 cogs.osu_commands 功能模組！")
     except Exception as e:
         print(f"❌ 載入 osu_commands 失敗: {e}")
+
+    # 把全域註冊的 hybrid 指令複製到指定伺服器並同步，一定要在 cog 載入之後才做，
+    # 這樣 cog 裡定義的指令才會一併被同步進去
+    bot.tree.copy_global_to(guild=GUILD)
+    synced = await bot.tree.sync(guild=GUILD)
+    print(f"✅ 已同步 {len(synced)} 個 Slash 指令到伺服器")
 
 @bot.event
 async def on_ready():

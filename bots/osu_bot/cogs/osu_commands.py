@@ -1,6 +1,7 @@
 import os
 import requests
 import discord
+from discord import app_commands
 from discord.ext import commands
 from firebase_admin import db
 from ossapi import Ossapi
@@ -349,7 +350,8 @@ class OsuCommands(commands.Cog):
             return None
 
     # 1. 指令 !link
-    @commands.command(name="link")
+    @commands.hybrid_command(name="link", description="綁定你的 osu! 帳號")
+    @app_commands.describe(osu_name="你的 osu! 帳號名稱")
     async def link(self, ctx, *, osu_name: str = None):
         if not osu_name:
             await ctx.send(embed=error_embed("使用方法錯誤！請輸入：`!link [你的 osu! 帳號名稱]`"))
@@ -378,7 +380,8 @@ class OsuCommands(commands.Cog):
         return error_embed(f"{ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link [你的 osu! 帳號]`")
 
     # 2. 指令 !top（可選：!top @成員 查詢別人）
-    @commands.command(name="top")
+    @commands.hybrid_command(name="top", description="查看戰績 Top 1-5（不指定就查自己）")
+    @app_commands.describe(target="要查詢的成員（可省略，預設查自己）")
     async def top(self, ctx, target: discord.Member = None):
         lookup_member = target or ctx.author
         ref = db.reference(f'users/{lookup_member.id}')
@@ -412,7 +415,8 @@ class OsuCommands(commands.Cog):
         await ctx.send(embed=embed, view=view)
 
     # 2.5 指令 !profile（四模式玩家數據總覽，可選：!profile @成員 查詢別人）
-    @commands.command(name="profile", aliases=["pf"])
+    @commands.hybrid_command(name="profile", aliases=["pf"], description="四模式玩家數據總覽（不指定就查自己）")
+    @app_commands.describe(target="要查詢的成員（可省略，預設查自己）")
     async def profile(self, ctx, target: discord.Member = None):
         lookup_member = target or ctx.author
         ref = db.reference(f'users/{lookup_member.id}')
@@ -430,7 +434,8 @@ class OsuCommands(commands.Cog):
         await ctx.send(embed=embed, view=view)
 
     # 3. 指令 !compare
-    @commands.command(name="compare", aliases=["c"])
+    @commands.hybrid_command(name="compare", aliases=["c"], description="跟指定成員比較四模式 PP")
+    @app_commands.describe(target="要比較的對象")
     async def compare(self, ctx, target: discord.Member = None):
         if not target:
             await ctx.send(embed=error_embed("使用方法錯誤！請標記你想對比的對象，例如：`!compare @成員名稱`"))
@@ -519,7 +524,7 @@ class OsuCommands(commands.Cog):
         await ctx.send(embed=embed)
 
     # 4. 指令 !leaderboard
-    @commands.command(name="leaderboard", aliases=["lb"])
+    @commands.hybrid_command(name="leaderboard", aliases=["lb"], description="伺服器四模式綜合 PP 排行榜 Top 10")
     async def leaderboard(self, ctx):
         all_users = db.reference('users').get()
         if not all_users:
@@ -578,7 +583,8 @@ class OsuCommands(commands.Cog):
         await ctx.send(embed=embed)
 
     # 5. 指令 !collections（查詢在 osu-花火網頁 發布的圖庫收藏，可選：查別人）
-    @commands.command(name="collections", aliases=["col"])
+    @commands.hybrid_command(name="collections", aliases=["col"], description="查詢在 osu-花火網頁 上發布的圖庫收藏摘要")
+    @app_commands.describe(target="要查詢的成員（可省略，預設查自己）")
     async def collections_cmd(self, ctx, target: discord.Member = None):
         lookup_member = target or ctx.author
         ref = db.reference(f'users/{lookup_member.id}')
@@ -620,7 +626,7 @@ class OsuCommands(commands.Cog):
         await ctx.send(embed=embed)
 
     # 6. 指令 !help（指令選單）
-    @commands.command(name="help", aliases=["menu", "指令"])
+    @commands.hybrid_command(name="help", aliases=["menu", "指令"], description="顯示 Osu Bot 的指令選單")
     async def help_command(self, ctx):
         embed = discord.Embed(
             title="📖 Osu Bot 指令選單",

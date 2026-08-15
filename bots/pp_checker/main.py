@@ -3,11 +3,15 @@ import urllib.request
 import random
 import requests
 import discord
+from discord import app_commands
 from discord.ext import commands
 from ossapi import Ossapi, Mod
 import rosu_pp_py
 from flask import Flask
 from threading import Thread
+
+# Slash 指令同步到這個伺服器（幾乎立即生效，不用等 Discord 全域同步最長 1 小時的傳播時間）
+GUILD = discord.Object(id=1505477519753609226)
 
 # ============ Flask 伺服器（防斷線健康檢查用，內容見檔案底部 keep_alive）============
 app = Flask('')
@@ -54,6 +58,14 @@ def fetch_farm_maps(pp_min=None, pp_max=None, mods="NM", mode="osu", farm_only=F
 
 # ============ Discord Bot 指令 ============
 @bot.event
+async def setup_hook():
+    # 把全域註冊的 hybrid 指令複製到指定伺服器並同步，這樣 /指令 幾乎立即生效，
+    # 不用等 Discord 全域同步最長 1 小時的傳播時間
+    bot.tree.copy_global_to(guild=GUILD)
+    synced = await bot.tree.sync(guild=GUILD)
+    print(f"✅ 已同步 {len(synced)} 個 Slash 指令到伺服器")
+
+@bot.event
 async def on_ready():
     print(f"PP查詢員已上線：{bot.user}")
 
@@ -74,12 +86,19 @@ async def on_command_error(ctx, error):
         return
     print(f"[pp_checker] 未處理的指令錯誤: {error}")
 
-@bot.command()
+@bot.hybrid_command(description="測試機器人是否存活")
 async def ping(ctx):
     await ctx.send("pong! 🏓")
 
 # --- 1. 預估 PP 查詢指令 (!acc) ---
-@bot.command()
+@bot.hybrid_command(description="計算指定圖／ACC／Mod／combo／miss 組合下的預估 PP")
+@app_commands.describe(
+    beatmap_id="Beatmap ID（osu! 地圖網址最後那串數字）",
+    accuracy="準確度（0~100 的百分比數字）",
+    mods_str="Mod 組合，例如 HD、HDDT（可省略，預設 No Mod）",
+    combo="最大連段數（可省略，預設當作 Full Combo）",
+    misses="Miss 數（可省略，預設 0）",
+)
 async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = "", combo: int = None, misses: int = None):
     """
     用法:
@@ -179,7 +198,11 @@ def format_length(seconds):
     m, s = divmod(seconds, 60)
     return f"{m}:{s:02d}"
 
-@bot.command()
+@bot.hybrid_command(description="從農圖庫推薦圖：單一目標 PP 隨機抽一張，或用 最小-最大 列出範圍內的圖")
+@app_commands.describe(
+    target_pp="目標 PP（例如 400）或 PP 範圍（例如 200-300）",
+    mods="Mod 組合：NM/DT/HD/HDDT/HR/HDHR（可省略，預設 NM）",
+)
 async def rec(ctx, target_pp: str, mods: str = "NM"):
     """
     用法:
