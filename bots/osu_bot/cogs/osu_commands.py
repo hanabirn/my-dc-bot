@@ -890,10 +890,19 @@ class OsuCommands(commands.Cog):
         # ctx.guild.members 過濾——而且這個 bot 沒開 Server Members Intent，
         # 那份快取幾乎是空的，用它過濾反而會把剛綁定的人也濾掉
         all_users = db.reference('users').get() or {}
-        linked = [
-            (user_id, user_data) for user_id, user_data in all_users.items()
-            if user_data.get('osu_name')
-        ]
+        linked = []
+        seen_osu_names = set()
+        for user_id, user_data in all_users.items():
+            osu_name = user_data.get('osu_name')
+            if not osu_name:
+                continue
+            # 同一個 osu! 帳號可能被綁在不只一個 Discord 帳號上（例如手機／電腦分開登入），
+            # 排行榜看的是 osu! 帳號的實力，只留第一筆避免同一個人佔兩個名次
+            key = osu_name.lower()
+            if key in seen_osu_names:
+                continue
+            seen_osu_names.add(key)
+            linked.append((user_id, user_data))
 
         if not linked:
             await ctx.send(embed=info_embed("目前伺服器中還沒有人使用 `!link` 綁定 osu! 帳號，快來當第一個吧！"))
