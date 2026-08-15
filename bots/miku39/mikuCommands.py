@@ -91,6 +91,17 @@ def save_custom_images(images):
 GACHA_PITY_PATH = 'miku_gacha/pity'
 GACHA_PITY_THRESHOLD = 5
 
+# --- 抽卡稀有度分級：把「抽不抽得到精選圖」包裝成正式的稀有度階級，抽卡的爽感
+# 通常來自於知道自己抽到什麼等級，而不只是有沒有中。沿用現有的兩個圖庫，不用
+# 準備新素材：
+#   N（普通）：即時從 Safebooru 抓的隨機圖，範圍最廣、機率最高
+#   R（稀有）：BEAUTY_IMAGES，寫死在程式碼裡的精選圖庫
+#   SR（超稀有）：custom_images，主人透過 /加圖 額外新增的圖，通常數量少、更特別
+# 保底機制不變（依然保證不會抽到 N），R／SR 之間再依固定權重抽一次。
+GACHA_TIER_COLORS = {"N": "#9CA3AF", "R": "#60A5FA", "SR": "#C084FC"}
+GACHA_TIER_LABELS = {"N": "⚪ N", "R": "🔵 R", "SR": "🟣 SR"}
+GACHA_SR_CHANCE = 0.3  # 抽到「精選圖庫」時，有 30% 機率是 SR（custom_images），其餘是 R
+
 def _get_pity_count(user_id):
     if not firebase_admin._apps:
         return 0
@@ -448,7 +459,7 @@ def register_commands(bot):
             embed.set_footer(text="😮‍💨 偵測到你最近 osu! 排名有點退步，Miku 悄悄幫你加油中...")
         await ctx.send(embed=embed)
 
-    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖，可以收藏到珍藏庫（每日有次數上限，連續沒中精選圖會觸發保底）")
+    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖（N/R/SR 稀有度），可以收藏到珍藏庫（每日有次數上限，連續沒中 R 以上會觸發保底）")
     async def gacha_command(ctx):
         uid = str(ctx.author.id)
         level = _level_from_exp(_get_exp(uid))
@@ -470,29 +481,34 @@ def register_commands(bot):
             img_url = fetch_random_anime_image()
 
         if img_url:
-            is_curated = False
+            tier = "N"
             pity_count += 1
             _set_pity_count(uid, pity_count)
         else:
-            curated_pool = BEAUTY_IMAGES + get_custom_images()
-            img_url = random.choice(curated_pool)
-            is_curated = True
+            custom_images = get_custom_images()
+            if custom_images and random.random() < GACHA_SR_CHANCE:
+                tier = "SR"
+                img_url = random.choice(custom_images)
+            else:
+                tier = "R"
+                img_url = random.choice(BEAUTY_IMAGES)
             _set_pity_count(uid, 0)
 
         _increment_daily_draw_count(uid, draw_count)
         _add_exp(uid, GACHA_EXP)
         draws_used = draw_count + 1
+        is_curated = tier != "N"
 
         embed = discord.Embed(
-            title="🎤 世界第一公主殿下 美圖抽卡 ♪",
+            title=f"🎤 世界第一公主殿下 美圖抽卡 ♪　{GACHA_TIER_LABELS[tier]}",
             description="點擊按鈕或輸入指令可以收藏到珍藏庫喔！",
-            color=discord.Color.from_str("#39C5BB")
+            color=discord.Color.from_str(GACHA_TIER_COLORS[tier])
         )
         embed.set_image(url=img_url)
         if is_curated and pity_triggered:
-            embed.set_footer(text=f"🌟 保底觸發！連續沒中精選圖庫，這次直接送上精選美圖～（保底進度已重置）今日抽卡：{draws_used}/{daily_limit}")
+            embed.set_footer(text=f"🌟 保底觸發！這次直接送上 {tier} 美圖～（保底進度已重置）今日抽卡：{draws_used}/{daily_limit}")
         elif is_curated:
-            embed.set_footer(text=f"✨ 精選圖庫出貨！（保底進度已重置）今日抽卡：{draws_used}/{daily_limit}")
+            embed.set_footer(text=f"✨ {tier} 出貨！（保底進度已重置）今日抽卡：{draws_used}/{daily_limit}")
         else:
             embed.set_footer(text=f"🎲 保底進度：{pity_count}/{pity_threshold}　今日抽卡：{draws_used}/{daily_limit}")
         await ctx.send(embed=embed, view=CollectView(img_url))
@@ -630,7 +646,7 @@ def register_commands(bot):
             color=discord.Color.from_str("#39C5BB")
         )
         embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩，每天限抽一次（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
-        embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫。每日限抽 {GACHA_DAILY_LIMIT} 次，連續 {GACHA_PITY_THRESHOLD} 次沒中精選圖庫會自動保底！", inline=False)
+        embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖，分 ⚪N／🔵R／🟣SR 三種稀有度，可以收藏到珍藏庫。每日限抽 {GACHA_DAILY_LIMIT} 次，連續 {GACHA_PITY_THRESHOLD} 次沒中 R 以上會自動保底！", inline=False)
         embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
         embed.add_field(name="`/簽到`", value="每日簽到，連續簽到經驗值獎勵會越來越多，中斷一天就重新從第 1 天算起", inline=False)
         embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡`、`/簽到` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
