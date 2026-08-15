@@ -321,7 +321,6 @@ async def rec(ctx, target_pp: str, mods: str = "NM"):
         random.shuffle(suitable)
         shown = suitable[:10]
 
-        # 用 Thumbnail（不是 set_image）避免被 Discord 合併圖片
         embeds = []
 
         for index, m in enumerate(shown):
@@ -344,7 +343,7 @@ async def rec(ctx, target_pp: str, mods: str = "NM"):
             emb.add_field(name="BPM", value=f"{bpm:.0f}", inline=True)
 
             if s_id:
-                emb.set_thumbnail(url=f"https://assets.ppy.sh/beatmaps/{s_id}/covers/list.jpg")
+                emb.set_image(url=f"https://assets.ppy.sh/beatmaps/{s_id}/covers/cover.jpg?v={random.random()}")
 
             if index == len(shown) - 1:
                 emb.set_footer(text=f"共找到 {len(suitable)} 張，隨機顯示其中 {len(shown)} 張 | Mod: {mods} | 資料來源：osu-花火網頁 農圖庫")
