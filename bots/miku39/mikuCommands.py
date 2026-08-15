@@ -300,6 +300,31 @@ def register_commands(bot):
         total = len(BEAUTY_IMAGES) + len(custom_images)
         await ctx.send(f"💚 成功加入精選圖庫！（目前精選圖庫共 {total} 張，立即生效）")
 
+    @bot.hybrid_command(name="移除", description="（僅限主人）從精選圖庫移除一張圖片網址")
+    @app_commands.describe(url="要移除的圖片網址（貼跟 /加圖 時一樣的網址）")
+    async def remove_image_command(ctx, url: str):
+        owner_id = os.getenv("MIKU_OWNER_ID")
+        if not owner_id or str(ctx.author.id) != owner_id:
+            await ctx.send("❌ 只有小天地主人才能移除精選圖庫喔！")
+            return
+
+        if not firebase_admin._apps:
+            await ctx.send("❌ Firebase 尚未設定好，暫時無法移除圖庫（不影響現有的 /抽卡）。")
+            return
+
+        custom_images = get_custom_images()
+        if url not in custom_images:
+            if url in BEAUTY_IMAGES:
+                await ctx.send("⚠️ 這張圖是寫死在程式碼裡的原始精選圖，沒辦法用這個指令移除，要移除的話要直接改 googleSearch.py 並重新部署。")
+            else:
+                await ctx.send("⚠️ 找不到這個網址，可能已經不在精選圖庫裡了。")
+            return
+
+        custom_images.remove(url)
+        save_custom_images(custom_images)
+        total = len(BEAUTY_IMAGES) + len(custom_images)
+        await ctx.send(f"🗑️ 已從精選圖庫移除這張圖！（目前精選圖庫共 {total} 張）")
+
     @bot.hybrid_command(name="選單", aliases=["help", "指令"], description="顯示 MIKU39 的指令說明")
     async def menu_command(ctx):
         embed = discord.Embed(
@@ -313,5 +338,6 @@ def register_commands(bot):
         owner_id = os.getenv("MIKU_OWNER_ID")
         if owner_id and str(ctx.author.id) == owner_id:
             embed.add_field(name="`/加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
+            embed.add_field(name="`/移除 [網址]`", value="（僅限主人）從精選圖庫移除一張圖片網址", inline=False)
         embed.set_footer(text="💚 想再看一次這份選單，隨時輸入 /選單 或 bot 選單")
         await ctx.send(embed=embed)
