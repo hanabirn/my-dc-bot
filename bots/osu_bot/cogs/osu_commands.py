@@ -185,6 +185,114 @@ class OsuModeView(discord.ui.View):
 
 
 # ========================================================
+# 🕐 最近一次遊玩紀錄（不論成功或失敗，跟只顯示最佳成績的 !top 互補）
+# ========================================================
+def generate_recent_embed(osu_name, osu_user_id, mode_id, author_mention, author_avatar_url):
+    """抓取最近一次遊玩紀錄並生成對應 Embed"""
+    mode_key, mode_name = OSU_MODES[mode_id]
+
+    embed = discord.Embed(
+        title=f"🕐 {osu_name} 的 {mode_name} 最近遊玩",
+        color=discord.Color.from_rgb(255, 102, 170)
+    )
+
+    osu_profile_link = f"https://osu.ppy.sh/users/{osu_user_id if osu_user_id else osu_name}"
+    embed.description = (
+        f"✨ **伺服器成員**：{osu_name}\n"
+        f"• **Discord 帳號**：{author_mention}\n"
+        f"• **osu! 個人檔案**：[點擊前往個人主頁]({osu_profile_link})\n"
+        f"──────────────────"
+    )
+
+    if osu_user_id:
+        embed.set_thumbnail(url=f"https://a.ppy.sh/{osu_user_id}")
+    else:
+        embed.set_thumbnail(url=author_avatar_url)
+
+    try:
+        user_id = resolve_user_id(osu_name, osu_user_id)
+        # include_fails=True：rs 類指令的慣例是連失敗的那次都顯示，不是只顯示通過的
+        recent_plays = osu_api.user_scores(user_id, type="recent", mode=mode_key, limit=1, include_fails=True)
+
+        if not recent_plays:
+            embed.add_field(name="提示", value="```ansi\n[1;30m* 最近沒有此模式的遊玩紀錄 *[0m\n```", inline=False)
+            return embed
+
+        play = recent_plays[0]
+        beatmap = play.beatmap
+        beatmapset = play.beatmapset
+        beatmap_id = beatmap.id if beatmap else play.beatmap_id
+
+        pp = play.pp or 0.0
+        acc = (play.accuracy or 0.0) * 100
+        mods_text = parse_mods(play.mods)
+        rank_value = play.rank.value if play.passed else "F"
+        colored_rank = RANK_ANSI_STRINGS.get(rank_value, rank_value)
+        status_text = "✅ 通過" if play.passed else "❌ 失敗 (Fail)"
+
+        map_title = beatmapset.title if beatmapset else "未知譜面歌曲"
+        map_version = beatmap.version if beatmap else "未知難度"
+        clean_title = map_title.replace('[', '［').replace(']', '］')
+        clean_version = map_version.replace('[', '［').replace(']', '］')
+        download_link = f"https://osu.ppy.sh/b/{beatmap_id}"
+
+        field_value = f"🎵 {clean_title} ［{clean_version}］\n"
+        field_value += f"🔗 譜面連結: <{download_link}>\n"
+        field_value += "```ansi\n"
+        field_value += f"🎖️ {status_text} | [1;35m{pp:>6.2f} PP[0m | [1;36m{acc:>6.2f}%[0m | {colored_rank} [1;37m({mods_text})[0m```"
+
+        embed.add_field(name="最近一次遊玩", value=field_value, inline=False)
+
+        if beatmapset:
+            embed.set_image(url=f"https://assets.ppy.sh/beatmapsets/{beatmapset.id}/covers/cover.jpg")
+
+    except Exception as e:
+        print(f"generate_recent_embed 失敗: {e}")
+        embed.add_field(name="錯誤", value="```ansi\n[1;31m❌ 連線官方 API 失敗[0m\n```", inline=False)
+
+    return embed
+
+
+class OsuRecentView(discord.ui.View):
+    def __init__(self, ctx, osu_name, osu_user_id, target_member=None):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        self.osu_name = osu_name
+        self.osu_user_id = osu_user_id
+        self.target_member = target_member or ctx.author
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("❌ 這不是你的對話面板，請自己輸入 `!recent` 查詢喔！", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Standard", style=discord.ButtonStyle.primary, emoji="⭕", custom_id="recent_btn_std")
+    async def std_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        new_embed = generate_recent_embed(self.osu_name, self.osu_user_id, 0, self.target_member.mention, self.target_member.display_avatar.url)
+        await interaction.message.edit(embed=new_embed, view=self)
+
+    @discord.ui.button(label="Taiko", style=discord.ButtonStyle.success, emoji="🥁", custom_id="recent_btn_taiko")
+    async def taiko_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        new_embed = generate_recent_embed(self.osu_name, self.osu_user_id, 1, self.target_member.mention, self.target_member.display_avatar.url)
+        await interaction.message.edit(embed=new_embed, view=self)
+
+    @discord.ui.button(label="Catch", style=discord.ButtonStyle.danger, emoji="🍎", custom_id="recent_btn_ctb")
+    async def ctb_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        new_embed = generate_recent_embed(self.osu_name, self.osu_user_id, 2, self.target_member.mention, self.target_member.display_avatar.url)
+        await interaction.message.edit(embed=new_embed, view=self)
+
+    @discord.ui.button(label="Mania", style=discord.ButtonStyle.secondary, emoji="🎹", custom_id="recent_btn_mania")
+    async def mania_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        new_embed = generate_recent_embed(self.osu_name, self.osu_user_id, 3, self.target_member.mention, self.target_member.display_avatar.url)
+        await interaction.message.edit(embed=new_embed, view=self)
+
+
+# ========================================================
 # 📊 四模式玩家數據總覽
 # ========================================================
 def generate_profile_embed(osu_name, osu_user_id, mode_id, author_mention, author_avatar_url, rank_track_id=None):
@@ -414,6 +522,25 @@ class OsuCommands(commands.Cog):
         view = OsuModeView(ctx, osu_name, osu_user_id)
         await ctx.send(embed=embed, view=view)
 
+    # 2.4 指令 !recent（最近一次遊玩紀錄，不論成功或失敗，可選：!recent @成員 查詢別人）
+    @commands.hybrid_command(name="recent", aliases=["rs"], description="查看最近一次遊玩紀錄（不論成功或失敗）")
+    @app_commands.describe(target="要查詢的成員（可省略，預設查自己）")
+    async def recent(self, ctx, target: discord.Member = None):
+        lookup_member = target or ctx.author
+        ref = db.reference(f'users/{lookup_member.id}')
+        user_data = ref.get()
+
+        if not user_data:
+            await ctx.send(embed=self._no_link_embed(ctx, target))
+            return
+
+        osu_name = user_data.get('osu_name')
+        osu_user_id = self._lookup_osu_user_id(osu_name)
+
+        embed = generate_recent_embed(osu_name, osu_user_id, 0, lookup_member.mention, lookup_member.display_avatar.url)
+        view = OsuRecentView(ctx, osu_name, osu_user_id, target_member=lookup_member)
+        await ctx.send(embed=embed, view=view)
+
     # 2.5 指令 !profile（四模式玩家數據總覽，可選：!profile @成員 查詢別人）
     @commands.hybrid_command(name="profile", aliases=["pf"], description="四模式玩家數據總覽（不指定就查自己）")
     @app_commands.describe(target="要查詢的成員（可省略，預設查自己）")
@@ -635,6 +762,7 @@ class OsuCommands(commands.Cog):
         )
         embed.add_field(name="`!link [osu!帳號]`", value="綁定你的 osu! 帳號", inline=False)
         embed.add_field(name="`!top [@成員]`", value="查看戰績 Top 1-5（不指定就查自己，也可以 `!top @成員` 查別人）", inline=False)
+        embed.add_field(name="`!recent [@成員]`（別名 `!rs`）", value="查看最近一次遊玩紀錄，不論有沒有破紀錄、成功或失敗", inline=False)
         embed.add_field(name="`!profile [@成員]`（別名 `!pf`）", value="四模式玩家數據總覽（PP、排名、精準度、命中分佈），一樣可以查別人", inline=False)
         embed.add_field(name="`!compare @成員`（別名 `!c`）", value="跟指定成員比較四模式 PP", inline=False)
         embed.add_field(name="`!leaderboard`（別名 `!lb`）", value="伺服器四模式綜合 PP 排行榜 Top 10", inline=False)
