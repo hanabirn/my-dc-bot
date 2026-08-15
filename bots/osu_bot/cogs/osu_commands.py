@@ -161,8 +161,9 @@ class OsuModeView(discord.ui.View):
 # ========================================================
 # 📊 四模式玩家數據總覽
 # ========================================================
-def generate_profile_embed(osu_name, osu_user_id, mode_id, author_mention, author_avatar_url):
-    """抓取特定模式的玩家整體數據並生成 Embed"""
+def generate_profile_embed(osu_name, osu_user_id, mode_id, author_mention, author_avatar_url, rank_track_id=None):
+    """抓取特定模式的玩家整體數據並生成 Embed。
+    rank_track_id：綁定該 osu! 帳號的 Discord user id，用來跟上次查詢的全球排名比較升降。"""
     mode_key, mode_name = OSU_MODES[mode_id]
 
     embed = discord.Embed(
@@ -194,9 +195,23 @@ def generate_profile_embed(osu_name, osu_user_id, mode_id, author_mention, autho
             return embed
 
         pp_raw = stats.pp or 0.0
-        global_rank = stats.global_rank if stats.global_rank is not None else "N/A"
+        raw_global_rank = stats.global_rank
+        global_rank = raw_global_rank if raw_global_rank is not None else "N/A"
         country_rank = stats.country_rank if stats.country_rank is not None else "N/A"
         accuracy = stats.hit_accuracy or 0.0
+
+        # 🔺 排名變化追蹤：跟上次查詢時記錄的全球排名比較
+        rank_change_text = ""
+        if rank_track_id is not None and raw_global_rank is not None:
+            rank_history_ref = db.reference(f'users/{rank_track_id}/last_rank/{mode_key}')
+            prev_rank = rank_history_ref.get()
+            if isinstance(prev_rank, int) and prev_rank != raw_global_rank:
+                diff = abs(prev_rank - raw_global_rank)
+                if prev_rank > raw_global_rank:
+                    rank_change_text = f" (▲{diff:,})"
+                else:
+                    rank_change_text = f" (▼{diff:,})"
+            rank_history_ref.set(raw_global_rank)
         level = stats.level.current if stats.level else 0
         playcount = stats.play_count or 0
         ranked_score = stats.ranked_score or 0
@@ -213,7 +228,7 @@ def generate_profile_embed(osu_name, osu_user_id, mode_id, author_mention, autho
             name=f"📊 {mode_name}",
             value=(
                 f"**PP：** {pp_raw:,.1f}\n"
-                f"**全球排名：** #{global_rank}\n"
+                f"**全球排名：** #{global_rank}{rank_change_text}\n"
                 f"**國家排名：** #{country_rank}\n"
                 f"**精準度：** {accuracy:.2f}%\n"
                 f"**等級：** Lv.{level}"
@@ -254,11 +269,13 @@ def generate_profile_embed(osu_name, osu_user_id, mode_id, author_mention, autho
 
 
 class OsuProfileView(discord.ui.View):
-    def __init__(self, ctx, osu_name, osu_user_id):
+    def __init__(self, ctx, osu_name, osu_user_id, target_member=None):
         super().__init__(timeout=None)
         self.ctx = ctx
         self.osu_name = osu_name
         self.osu_user_id = osu_user_id
+        # 被查詢的成員（沒指定時就是查詢者自己），用來顯示 mention/頭像並記錄排名歷史
+        self.target_member = target_member or ctx.author
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.ctx.author.id:
@@ -269,25 +286,25 @@ class OsuProfileView(discord.ui.View):
     @discord.ui.button(label="Standard", style=discord.ButtonStyle.primary, emoji="⭕", custom_id="profile_btn_std")
     async def std_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 0, self.ctx.author.mention, self.ctx.author.display_avatar.url)
+        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 0, self.target_member.mention, self.target_member.display_avatar.url, rank_track_id=self.target_member.id)
         await interaction.message.edit(embed=new_embed, view=self)
 
     @discord.ui.button(label="Taiko", style=discord.ButtonStyle.success, emoji="🥁", custom_id="profile_btn_taiko")
     async def taiko_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 1, self.ctx.author.mention, self.ctx.author.display_avatar.url)
+        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 1, self.target_member.mention, self.target_member.display_avatar.url, rank_track_id=self.target_member.id)
         await interaction.message.edit(embed=new_embed, view=self)
 
     @discord.ui.button(label="Catch", style=discord.ButtonStyle.danger, emoji="🍎", custom_id="profile_btn_ctb")
     async def ctb_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 2, self.ctx.author.mention, self.ctx.author.display_avatar.url)
+        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 2, self.target_member.mention, self.target_member.display_avatar.url, rank_track_id=self.target_member.id)
         await interaction.message.edit(embed=new_embed, view=self)
 
     @discord.ui.button(label="Mania", style=discord.ButtonStyle.secondary, emoji="🎹", custom_id="profile_btn_mania")
     async def mania_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 3, self.ctx.author.mention, self.ctx.author.display_avatar.url)
+        new_embed = generate_profile_embed(self.osu_name, self.osu_user_id, 3, self.target_member.mention, self.target_member.display_avatar.url, rank_track_id=self.target_member.id)
         await interaction.message.edit(embed=new_embed, view=self)
 
 
@@ -330,15 +347,20 @@ class OsuCommands(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ 寫入資料庫失敗，錯誤原因: {e}")
 
-    # 2. 指令 !top
+    def _no_link_message(self, ctx, target):
+        if target:
+            return f"❌ **{target.display_name}** 還沒有綁定 osu! 帳號。"
+        return f"❌ {ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link [你的 osu! 帳號]`"
+
+    # 2. 指令 !top（可選：!top @成員 查詢別人）
     @commands.command(name="top")
-    async def top(self, ctx):
-        user_id = str(ctx.author.id)
-        ref = db.reference(f'users/{user_id}')
+    async def top(self, ctx, target: discord.Member = None):
+        lookup_member = target or ctx.author
+        ref = db.reference(f'users/{lookup_member.id}')
         user_data = ref.get()
 
         if not user_data:
-            await ctx.send(f"❌ {ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link [你的 osu! 帳號]`")
+            await ctx.send(self._no_link_message(ctx, target))
             return
 
         osu_name = user_data.get('osu_name')
@@ -347,8 +369,8 @@ class OsuCommands(commands.Cog):
         embed = discord.Embed(
             title=f"🏆 {osu_name} 的戰績主頁面",
             description=(
-                f"✨ **歡迎回來！**\n\n"
-                f"• **Discord 帳號**：{ctx.author.mention}\n"
+                f"✨ **{'歡迎回來！' if not target else f'{lookup_member.display_name} 的戰績查詢'}**\n\n"
+                f"• **Discord 帳號**：{lookup_member.mention}\n"
                 f"• **osu! 綁定帳號**：**{osu_name}**\n"
                 f"• **個人檔案**：[點擊前往個人主頁](https://osu.ppy.sh/users/{osu_user_id if osu_user_id else osu_name})\n\n"
                 f"📥 **請點擊下方的按鈕**，即可動態查看該模式的 Top 1-5 最佳表現！"
@@ -359,27 +381,27 @@ class OsuCommands(commands.Cog):
         if osu_user_id:
             embed.set_thumbnail(url=f"https://a.ppy.sh/{osu_user_id}")
         else:
-            embed.set_thumbnail(url=ctx.author.display_avatar.url)
+            embed.set_thumbnail(url=lookup_member.display_avatar.url)
 
         view = OsuModeView(ctx, osu_name, osu_user_id)
         await ctx.send(embed=embed, view=view)
 
-    # 2.5 指令 !profile（四模式玩家數據總覽）
+    # 2.5 指令 !profile（四模式玩家數據總覽，可選：!profile @成員 查詢別人）
     @commands.command(name="profile", aliases=["pf"])
-    async def profile(self, ctx):
-        user_id = str(ctx.author.id)
-        ref = db.reference(f'users/{user_id}')
+    async def profile(self, ctx, target: discord.Member = None):
+        lookup_member = target or ctx.author
+        ref = db.reference(f'users/{lookup_member.id}')
         user_data = ref.get()
 
         if not user_data:
-            await ctx.send(f"❌ {ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link [你的 osu! 帳號]`")
+            await ctx.send(self._no_link_message(ctx, target))
             return
 
         osu_name = user_data.get('osu_name')
         osu_user_id = self._lookup_osu_user_id(osu_name)
 
-        embed = generate_profile_embed(osu_name, osu_user_id, 0, ctx.author.mention, ctx.author.display_avatar.url)
-        view = OsuProfileView(ctx, osu_name, osu_user_id)
+        embed = generate_profile_embed(osu_name, osu_user_id, 0, lookup_member.mention, lookup_member.display_avatar.url, rank_track_id=lookup_member.id)
+        view = OsuProfileView(ctx, osu_name, osu_user_id, target_member=lookup_member)
         await ctx.send(embed=embed, view=view)
 
     # 3. 指令 !compare
@@ -515,6 +537,22 @@ class OsuCommands(commands.Cog):
         embed.add_field(name="📈 即時排名（前 10 名）", value=lb_text, inline=False)
         embed.set_footer(text="💡 想讓自己上榜或更新分數嗎？請與任意成員輸入一次 !compare 即可！")
 
+        await ctx.send(embed=embed)
+
+    # 5. 指令 !help（指令選單）
+    @commands.command(name="help", aliases=["menu", "指令"])
+    async def help_command(self, ctx):
+        embed = discord.Embed(
+            title="📖 Osu Bot 指令選單",
+            description="以下是目前可以使用的指令：\n──────────────────",
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        embed.add_field(name="`!link [osu!帳號]`", value="綁定你的 osu! 帳號", inline=False)
+        embed.add_field(name="`!top [@成員]`", value="查看戰績 Top 1-5（不指定就查自己，也可以 `!top @成員` 查別人）", inline=False)
+        embed.add_field(name="`!profile [@成員]`（別名 `!pf`）", value="四模式玩家數據總覽（PP、排名、精準度、命中分佈），一樣可以查別人", inline=False)
+        embed.add_field(name="`!compare @成員`（別名 `!c`）", value="跟指定成員比較四模式 PP", inline=False)
+        embed.add_field(name="`!leaderboard`（別名 `!lb`）", value="伺服器四模式綜合 PP 排行榜 Top 10", inline=False)
+        embed.set_footer(text="🎀 想再看一次這份選單，隨時輸入 !help")
         await ctx.send(embed=embed)
 
 # 載入 Cog 到主程式
