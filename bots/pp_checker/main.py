@@ -193,7 +193,7 @@ async def on_ready():
 # 補上一個全域錯誤處理，讓打錯指令的人至少會收到用法提示
 COMMAND_USAGE = {
     'acc': "用法：`!acc [beatmap_id] [accuracy] [mods]`，例如 `!acc 1234567 98.5 HD`",
-    'rec': "用法：`!rec [目標PP]` 或 `!rec [最小PP-最大PP]`，例如 `!rec 400` 或 `!rec 200-300`",
+    'rec': "用法：`!rec [目標PP] [Mod]` 或 `!rec [最小PP-最大PP] [Mod]`，例如 `!rec 400`、`!rec 400 DT`、`!rec 200-300 HR`（Mod 可省略，預設 NM，支援 NM/DT/HD/HDDT/HR/HDHR）",
 }
 
 @bot.event
@@ -263,13 +263,21 @@ async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = ""):
 
 # --- 2. 分類毒瘤抽圖指令 (!rec) ---
 # 資料來源改成 osu-花火網頁 的農圖庫 API（自動爬蟲更新），不再讀本地 maps_*.json
+FARM_MODS = {"NM", "DT", "HD", "HDDT", "HR", "HDHR"}
+
 @bot.command()
-async def rec(ctx, target_pp: str):
+async def rec(ctx, target_pp: str, mods: str = "NM"):
     """
     用法:
-      !rec 400        → 隨機抽一張 ~400pp 的圖
-      !rec 200-300    → 列出 200~300pp 的所有圖（最多 10 張，每張皆含橫幅）
+      !rec 400           → 隨機抽一張 NM ~400pp 的圖
+      !rec 400 DT        → 指定 Mod（NM/DT/HD/HDDT/HR/HDHR）
+      !rec 200-300       → 列出 200~300pp 的所有圖（最多 10 張，每張皆含橫幅）
+      !rec 200-300 HR    → 範圍搜尋一樣可以指定 Mod
     """
+    mods = mods.upper()
+    if mods not in FARM_MODS:
+        return await ctx.send(f"❌ 不支援的 Mod：`{mods}`，目前支援 {', '.join(sorted(FARM_MODS))}")
+
     # --- 範圍搜尋 ---
     if "-" in target_pp:
         try:
@@ -278,16 +286,16 @@ async def rec(ctx, target_pp: str):
         except ValueError:
             return await ctx.send("❌ 格式錯誤，請用 `!rec 最小PP-最大PP`，例如 `!rec 200-300`")
 
-        await ctx.send(f"🔍 正在從網站農圖庫搜尋 {min_pp}~{max_pp}pp 的地圖...")
+        await ctx.send(f"🔍 正在從網站農圖庫搜尋 {min_pp}~{max_pp}pp（{mods}）的地圖...")
 
         try:
-            suitable = fetch_farm_maps(pp_min=min_pp, pp_max=max_pp)
+            suitable = fetch_farm_maps(pp_min=min_pp, pp_max=max_pp, mods=mods)
         except Exception as e:
             print(f"farm-maps-list 查詢失敗: {e}")
             return await ctx.send("❌ 連線農圖庫網站失敗，請稍後再試。")
 
         if not suitable:
-            return await ctx.send(f"😢 找不到 {min_pp}~{max_pp}pp 範圍內的地圖。")
+            return await ctx.send(f"😢 找不到 {min_pp}~{max_pp}pp（{mods}）範圍內的地圖。")
 
         # 先徹底打亂符合條件的清單，再抽取前 10 張，保證每次都隨機
         random.shuffle(suitable)
@@ -303,7 +311,7 @@ async def rec(ctx, target_pp: str):
             name = f"{m.get('artist')} - {m.get('title')} [{m.get('version')}]"
 
             emb = discord.Embed(
-                title=f"#{index + 1} | {pp:.0f}pp | Mod: NM",
+                title=f"#{index + 1} | {pp:.0f}pp | Mod: {mods}",
                 description=f"🎵 **[{name}](https://osu.ppy.sh/b/{b_id})**",
                 color=discord.Color.from_rgb(255, 102, 170)
             )
@@ -325,19 +333,19 @@ async def rec(ctx, target_pp: str):
     except ValueError:
         return await ctx.send("❌ 請輸入數字，例如 `!rec 400` 或 `!rec 200-300`")
 
-    await ctx.send(f"🔍 正在從網站農圖庫搜尋 {target_pp_int}pp 左右的推薦地圖...")
+    await ctx.send(f"🔍 正在從網站農圖庫搜尋 {target_pp_int}pp（{mods}）左右的推薦地圖...")
 
     try:
-        suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 10, pp_max=target_pp_int + 10)
+        suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 10, pp_max=target_pp_int + 10, mods=mods)
 
         if not suitable_maps:
             level = (target_pp_int // 100) * 100
-            suitable_maps = fetch_farm_maps(pp_min=level, pp_max=level + 99)
+            suitable_maps = fetch_farm_maps(pp_min=level, pp_max=level + 99, mods=mods)
             if suitable_maps:
                 await ctx.send(f"⚠️ 提示：沒有剛好在 {target_pp_int}±10pp 內的地圖，改從整個 {level}pp 範圍中隨機抽選。")
 
         if not suitable_maps:
-            suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 50, pp_max=target_pp_int + 50)
+            suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 50, pp_max=target_pp_int + 50, mods=mods)
             if suitable_maps:
                 await ctx.send(f"⚠️ 提示：找不到 {target_pp_int}pp 附近的地圖，改從 ±50pp 範圍中隨機抽選。")
     except Exception as e:
@@ -345,7 +353,7 @@ async def rec(ctx, target_pp: str):
         return await ctx.send("❌ 連線農圖庫網站失敗，請稍後再試。")
 
     if not suitable_maps:
-        return await ctx.send(f"😢 網站農圖庫目前還沒有 {target_pp_int}pp 附近的地圖資料。")
+        return await ctx.send(f"😢 網站農圖庫目前還沒有 {target_pp_int}pp（{mods}）附近的地圖資料。")
 
     chosen_map = random.choice(suitable_maps)
     b_id = chosen_map.get('beatmap_id')
@@ -359,7 +367,7 @@ async def rec(ctx, target_pp: str):
         color=discord.Color.from_rgb(255, 102, 170)
     )
     embed.add_field(name="地圖 ID (Beatmap ID)", value=f"`{b_id}`", inline=True)
-    embed.add_field(name="推薦搭配 Mod", value="`NM`", inline=True)
+    embed.add_field(name="推薦搭配 Mod", value=f"`{mods}`", inline=True)
     embed.add_field(name="預估 PP", value=f"`{avg_pp:.0f} pp`", inline=True)
 
     if s_id:
