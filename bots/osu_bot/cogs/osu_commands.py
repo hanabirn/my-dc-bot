@@ -942,28 +942,27 @@ class OsuCommands(commands.Cog):
             description="即時抓取所有已 `!link` 綁定成員的最新 osu! 數據進行排名。\n──────────────────"
         )
 
-        lb_text = "```ansi\n"
-        lb_text += "名次 | 玩家名稱           |     PP\n"
-        lb_text += "-----+--------------------+-----------\n"
-
+        # 國旗 emoji 用的是 regional indicator 字元，Discord 在 ``` code block／`inline code`
+        # 裡不會套用自家的圖片化 emoji 渲染，只會用系統字型顯示（Windows 常常直接顯示不出來），
+        # 所以排行榜這邊改成一般文字排版，只把 PP 數字包成 inline code，國旗才能正常顯示
+        lines = []
         for index, player in enumerate(results[:10]):
             rank = index + 1
             flag = country_flag(player['country'])
             name = player['osu_name']
 
             if rank == 1:
-                rank_str = "\x1b[1;33m🥇 \x1b[0m"
+                rank_str = "🥇"
             elif rank == 2:
-                rank_str = "\x1b[1;36m🥈 \x1b[0m"
+                rank_str = "🥈"
             elif rank == 3:
-                rank_str = "\x1b[1;31m🥉 \x1b[0m"
+                rank_str = "🥉"
             else:
-                rank_str = f"#{rank:<2}"
+                rank_str = f"`#{rank}`"
 
-            lb_text += f"{rank_str} | {flag} {name:<15} | {player['pp']:>8.1f}\n"
+            lines.append(f"{rank_str} {flag} **{name}** — `{player['pp']:.1f}` pp")
 
-        lb_text += "```"
-        embed.add_field(name="📈 即時排名（前 10 名）", value=lb_text, inline=False)
+        embed.add_field(name="📈 即時排名（前 10 名）", value="\n".join(lines), inline=False)
         embed.set_footer(text="💡 想上榜嗎？先使用 !link 綁定你的 osu! 帳號即可！")
 
         await progress.edit(content=None, embed=embed)
