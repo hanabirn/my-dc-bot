@@ -264,6 +264,26 @@ async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = ""):
 # --- 2. 分類毒瘤抽圖指令 (!rec) ---
 # 資料來源改成 osu-花火網頁 的農圖庫 API（自動爬蟲更新），不再讀本地 maps_*.json
 FARM_MODS = {"NM", "DT", "HD", "HDDT", "HR", "HDHR"}
+NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+def star_color(star):
+    """依星數給對應顏色，跟 osu! 官方難度色系一致（農圖庫本身星數下限 5.5，
+    所以這裡的分段是針對「高難度」區間微調過的，橘→粉→紫→深紫，難度越高顏色越深）"""
+    star = star or 0
+    if star < 6.5:
+        return discord.Color.from_rgb(255, 165, 60)
+    if star < 7.5:
+        return discord.Color.from_rgb(255, 102, 170)
+    if star < 9.0:
+        return discord.Color.from_rgb(180, 90, 255)
+    if star < 11.0:
+        return discord.Color.from_rgb(120, 60, 220)
+    return discord.Color.from_rgb(60, 30, 80)
+
+def format_length(seconds):
+    seconds = int(seconds or 0)
+    m, s = divmod(seconds, 60)
+    return f"{m}:{s:02d}"
 
 @bot.command()
 async def rec(ctx, target_pp: str, mods: str = "NM"):
@@ -308,19 +328,26 @@ async def rec(ctx, target_pp: str, mods: str = "NM"):
             b_id = m.get('beatmap_id')
             s_id = m.get('beatmapset_id')
             pp = m.get('pp', 0)
-            name = f"{m.get('artist')} - {m.get('title')} [{m.get('version')}]"
+            star = m.get('star', 0)
+            bpm = m.get('bpm', 0)
+            name = f"{m.get('artist')} - {m.get('title')}"
+            num = NUMBER_EMOJIS[index] if index < len(NUMBER_EMOJIS) else f"#{index + 1}"
 
             emb = discord.Embed(
-                title=f"#{index + 1} | {pp:.0f}pp | Mod: {mods}",
-                description=f"🎵 **[{name}](https://osu.ppy.sh/b/{b_id})**",
-                color=discord.Color.from_rgb(255, 102, 170)
+                title=f"{num} {name}",
+                url=f"https://osu.ppy.sh/b/{b_id}",
+                description=f"[{m.get('version')}]",
+                color=star_color(star)
             )
+            emb.add_field(name="PP", value=f"{pp:.0f}pp", inline=True)
+            emb.add_field(name="★", value=f"{star:.2f}", inline=True)
+            emb.add_field(name="BPM", value=f"{bpm:.0f}", inline=True)
 
             if s_id:
                 emb.set_thumbnail(url=f"https://assets.ppy.sh/beatmaps/{s_id}/covers/list.jpg")
 
             if index == len(shown) - 1:
-                emb.set_footer(text=f"共找到 {len(suitable)} 張，隨機顯示其中 {len(shown)} 張 | 資料來源：osu-花火網頁 農圖庫")
+                emb.set_footer(text=f"共找到 {len(suitable)} 張，隨機顯示其中 {len(shown)} 張 | Mod: {mods} | 資料來源：osu-花火網頁 農圖庫")
 
             embeds.append(emb)
 
@@ -359,16 +386,25 @@ async def rec(ctx, target_pp: str, mods: str = "NM"):
     b_id = chosen_map.get('beatmap_id')
     s_id = chosen_map.get('beatmapset_id')
     avg_pp = chosen_map.get('pp', 0)
-    name = f"{chosen_map.get('artist')} - {chosen_map.get('title')} [{chosen_map.get('version')}]"
+    star = chosen_map.get('star', 0)
+    bpm = chosen_map.get('bpm', 0)
+    length = format_length(chosen_map.get('total_length'))
+    version = chosen_map.get('version', '')
+    creator = chosen_map.get('creator') or '？'
+    name = f"{chosen_map.get('artist')} - {chosen_map.get('title')}"
 
     embed = discord.Embed(
-        title=f"✨ 幫你找到一張 {avg_pp:.0f}pp 左右的農圖囉！",
-        description=f"🎵 **[{name}](https://osu.ppy.sh/b/{b_id})**",
-        color=discord.Color.from_rgb(255, 102, 170)
+        title=f"✨ {name}",
+        url=f"https://osu.ppy.sh/b/{b_id}",
+        description=f"[{version}] mapped by {creator}",
+        color=star_color(star)
     )
-    embed.add_field(name="地圖 ID (Beatmap ID)", value=f"`{b_id}`", inline=True)
-    embed.add_field(name="推薦搭配 Mod", value=f"`{mods}`", inline=True)
-    embed.add_field(name="預估 PP", value=f"`{avg_pp:.0f} pp`", inline=True)
+    embed.add_field(name="⭐ 星數", value=f"{star:.2f}★", inline=True)
+    embed.add_field(name="🎯 預估 PP", value=f"{avg_pp:.0f}pp", inline=True)
+    embed.add_field(name="🎮 Mod", value=f"`{mods}`", inline=True)
+    embed.add_field(name="🥁 BPM", value=f"{bpm:.0f}", inline=True)
+    embed.add_field(name="⏱️ 長度", value=length, inline=True)
+    embed.add_field(name="🆔 Beatmap ID", value=f"`{b_id}`", inline=True)
 
     if s_id:
         banner_url = f"https://assets.ppy.sh/beatmaps/{s_id}/covers/cover.jpg?v={random.random()}"
