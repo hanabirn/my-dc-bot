@@ -83,6 +83,30 @@ def get_custom_images():
 def save_custom_images(images):
     db.reference(CUSTOM_IMAGES_PATH).set(images)
 
+# --- 抽卡保底機制：參考常見 gacha bot（如 Genshin 抽卡模擬器）的 pity system，
+# 連續 GACHA_PITY_THRESHOLD 次都沒抽到精選圖庫的圖時，下一抽直接保底送上精選圖。
+# 保底次數存 Firebase（跨 Render 重新部署不會遺失），任何一步失敗都視為 0 次，
+# 頂多保底沒生效，不影響 /抽卡 本身能不能抽。
+GACHA_PITY_PATH = 'miku_gacha/pity'
+GACHA_PITY_THRESHOLD = 5
+
+def _get_pity_count(user_id):
+    if not firebase_admin._apps:
+        return 0
+    try:
+        return db.reference(f'{GACHA_PITY_PATH}/{user_id}').get() or 0
+    except Exception as e:
+        print(f"[MIKU39] 讀取保底次數失敗: {e}")
+        return 0
+
+def _set_pity_count(user_id, count):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{GACHA_PITY_PATH}/{user_id}').set(count)
+    except Exception as e:
+        print(f"[MIKU39] 更新保底次數失敗: {e}")
+
 def load_user_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -247,20 +271,40 @@ def register_commands(bot):
             embed.set_footer(text="😮‍💨 偵測到你最近 osu! 排名有點退步，Miku 悄悄幫你加油中...")
         await ctx.send(embed=embed)
 
-    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖，可以收藏到珍藏庫")
+    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖，可以收藏到珍藏庫（連續沒中精選圖會觸發保底）")
     async def gacha_command(ctx):
-        # 一半機率嘗試即時從網路抓一張新圖，抓不到（逾時/斷線）就退回精選圖庫，
-        # 確保這個指令永遠不會因為外部 API 問題而完全失敗
-        img_url = fetch_random_anime_image() if random.random() < 0.5 else None
-        if not img_url:
+        uid = str(ctx.author.id)
+        pity_count = _get_pity_count(uid)
+        pity_triggered = pity_count + 1 >= GACHA_PITY_THRESHOLD
+
+        # 保底還沒觸發時維持原本邏輯：一半機率嘗試即時從網路抓一張新圖，
+        # 抓不到（逾時/斷線）就退回精選圖庫，確保這個指令永遠不會因為外部 API 問題而完全失敗
+        img_url = None
+        if not pity_triggered and random.random() < 0.5:
+            img_url = fetch_random_anime_image()
+
+        if img_url:
+            is_curated = False
+            pity_count += 1
+            _set_pity_count(uid, pity_count)
+        else:
             curated_pool = BEAUTY_IMAGES + get_custom_images()
             img_url = random.choice(curated_pool)
+            is_curated = True
+            _set_pity_count(uid, 0)
+
         embed = discord.Embed(
             title="🎤 世界第一公主殿下 美圖抽卡 ♪",
             description="點擊按鈕或輸入指令可以收藏到珍藏庫喔！",
             color=discord.Color.from_str("#39C5BB")
         )
         embed.set_image(url=img_url)
+        if is_curated and pity_triggered:
+            embed.set_footer(text="🌟 保底觸發！連續沒中精選圖庫，這次直接送上精選美圖～（保底進度已重置）")
+        elif is_curated:
+            embed.set_footer(text="✨ 精選圖庫出貨！（保底進度已重置）")
+        else:
+            embed.set_footer(text=f"🎲 保底進度：{pity_count}/{GACHA_PITY_THRESHOLD}（連續抽不到精選圖庫達 {GACHA_PITY_THRESHOLD} 次會自動保底送上精選美圖）")
         await ctx.send(embed=embed, view=CollectView(img_url))
 
     @bot.hybrid_command(name="珍藏庫", description="翻看你收藏的美圖")
@@ -333,7 +377,7 @@ def register_commands(bot):
             color=discord.Color.from_str("#39C5BB")
         )
         embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
-        embed.add_field(name="`/抽卡`", value="隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫", inline=False)
+        embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫。連續 {GACHA_PITY_THRESHOLD} 次沒中精選圖庫會自動保底！", inline=False)
         embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
         owner_id = os.getenv("MIKU_OWNER_ID")
         if owner_id and str(ctx.author.id) == owner_id:
