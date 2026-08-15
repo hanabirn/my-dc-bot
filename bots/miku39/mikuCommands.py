@@ -5,7 +5,7 @@ import random
 import json
 import os
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from googleSearch import BEAUTY_IMAGES
 
 import firebase_admin
@@ -247,20 +247,26 @@ def _migrate_local_collections_to_firebase():
 _migrate_local_collections_to_firebase()
 
 # 🎲 7種運勢抽籤
+# GIF 來源說明：s1.aigei.com 那個網址已經失效（實測回傳 401 Unauthorized），原本
+# 用在 大吉／凶／羈絆吉 三個地方，全部是壞圖。makeagif 那個雖然還活著但檔案有
+# 8MB，對一個常常會被抽到的訊息來說太重。這裡全部換成驗證過能直接嵌入、且
+# 確實是初音未來本人的 GIF（c.tenor.com 那三個是 Tenor 的直連 CDN 網址，用
+# media.tenor.com/m/... 那種分享頁網址在 Discord 裡不會顯示圖片，記得只能用
+# c.tenor.com/<id>/<檔名>.gif 這種格式）。
 FORTUNE_LIST = [
-    {"type": "🌟 大吉", "desc": "今天打 osu! 的節奏感就像世界第一公主殿下一樣完美！適合去刷 pp 喔！", "gif": "https://s1.aigei.com/src/img/gif/16/1644ae8483424bfc9c17c770c3d82301.gif"},
-    {"type": "✨ 中吉", "desc": "今天狀態不錯呢♪ 稍微挑戰一下平常打不過的圖，說不定能輕鬆 FC 唷！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"},
+    {"type": "🌟 大吉", "desc": "今天打 osu! 的節奏感就像世界第一公主殿下一樣完美！適合去刷 pp 喔！", "gif": "https://c.tenor.com/8JhcC4OtwC8AAAAC/hatsune-miku-dance.gif"},
+    {"type": "✨ 中吉", "desc": "今天狀態不錯呢♪ 稍微挑戰一下平常打不過的圖，說不定能輕鬆 FC 唷！", "gif": "https://c.tenor.com/UYSDv3wnwhQAAAAC/hatsune-miku-dance.gif"},
     {"type": "🍀 小吉", "desc": "平穩的一天。泡杯蔥茶，輕鬆地享受幾首經典的 VOCALOID 曲目吧！", "gif": "https://i.pinimg.com/originals/1d/4c/ca/1d4cca014fe631c1a8a7e8a59e4263b2.gif"},
     {"type": "💠 末吉", "desc": "稍微有一點點容易掉 point... 打歌前記得先做一下手指拉伸運動喔！", "gif": "https://i.pinimg.com/originals/d9/e4/d0/d9e4d0064938e822c79614936fbf9ffc.gif"},
-    {"type": "⛅ 吉", "desc": "普通的一天，今天的 Miku 也在默默幫你加油，踏實地練習吧！", "gif": "https://i.makeagif.com/media/4-01-2023/E9l_XP.gif"},
-    {"type": "💧 凶", "desc": "今天可能會遇到音壓怪或者瘋狂 Miss... 沒關係，早點休息，明天又是新的一天！", "gif": "https://s1.aigei.com/src/img/gif/16/1644ae8483424bfc9c17c770c3d82301.gif"},
+    {"type": "⛅ 吉", "desc": "普通的一天，今天的 Miku 也在默默幫你加油，踏實地練習吧！", "gif": "https://c.tenor.com/Jopqcgk8uyAAAAAC/hatsune-miku-miku-hatsune.gif"},
+    {"type": "💧 凶", "desc": "今天可能會遇到音壓怪或者瘋狂 Miss... 沒關係，早點休息，明天又是新的一天！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"},
     {"type": "⚡ 大凶", "desc": "嗚哇！今天打歌手感不太對勁呢... 快去吃碗大蔥拉麵補充元氣，今天先別強求 pp 了！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"}
 ]
 
 # 好感度 Lv.5 起解鎖的隱藏籤詩，混在一般籤詩池裡有機率額外抽到（見 _pick_fortune）
 HIDDEN_FORTUNE_LIST = [
-    {"type": "💚 羈絆吉", "desc": "跟 Miku 之間的默契已經培養起來了呢！今天不管打什麼曲子，感覺都會被溫柔地包圍著唷～", "gif": "https://s1.aigei.com/src/img/gif/16/1644ae8483424bfc9c17c770c3d82301.gif"},
-    {"type": "🎋 特別吉", "desc": "身為認識這麼久的老朋友，Miku 偷偷告訴你一個秘密：今天很適合挑戰個人最佳紀錄喔！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"},
+    {"type": "💚 羈絆吉", "desc": "跟 Miku 之間的默契已經培養起來了呢！今天不管打什麼曲子，感覺都會被溫柔地包圍著唷～", "gif": "https://c.tenor.com/8JhcC4OtwC8AAAAC/hatsune-miku-dance.gif"},
+    {"type": "🎋 特別吉", "desc": "身為認識這麼久的老朋友，Miku 偷偷告訴你一個秘密：今天很適合挑戰個人最佳紀錄喔！", "gif": "https://c.tenor.com/UYSDv3wnwhQAAAAC/hatsune-miku-dance.gif"},
 ]
 
 # FORTUNE_LIST 索引對應的好/壞籤（依內容描述分類，不是單純依序排列——
