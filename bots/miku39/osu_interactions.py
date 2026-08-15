@@ -19,13 +19,18 @@ async def handle_play_interactions(fetched_message: discord.Message, all_text: s
         print(f"[osu! 互動] 偵測到 Miss 格式: {miss_match.group(0)}, 解析出 Miss 數: {miss_count}")
 
     # 2. 通用括號解析 [300/100/50/Miss]——訊息裡可能不只一組中括號（Mod 標籤、
-    #    圖名、ANSI 色碼都可能用到 []），所以要掃過全部的括號組，只挑「剛好是
-    #    4 個用 / 分開的數字」這種形狀的那一組，才當作命中分佈來源，避免抓到
-    #    第一個不相干的括號、誤判出錯的 Miss 數。
+    #    圖名、ANSI 色碼都可能用到 []），所以要掃過全部的括號組，只挑「看起來
+    #    像命中分佈」的那一組，才當作命中分佈來源，避免抓到第一個不相干的括號、
+    #    誤判出錯的 Miss 數。
+    #    各模式的判定數量不同，不能只認定是 4 個數字：
+    #      taiko: 300/100/miss (3個)　std/catch: 300/100/50/miss (4個)
+    #      mania: max/300/200/100/50/miss (5~6個，視該 bot 是否顯示 max)
+    #    只要求「全部是數字」+「數量落在 3~6 之間」，最後一個數字視為 Miss 數
+    #    （這些格式裡 miss 一律排最後，是這類戰績 bot 的共同慣例）。
     if miss_count is None:
         for bracket_match in re.finditer(r"\[([^\]]+)\]", all_text):
             parts = [p.strip() for p in bracket_match.group(1).split('/')]
-            if len(parts) == 4 and all(p.isdigit() for p in parts):
+            if 3 <= len(parts) <= 6 and all(p.isdigit() for p in parts):
                 miss_count = int(parts[-1])
                 print(f"[osu! 互動] 通用解析成功！模式數據: [{bracket_match.group(1)}], 解析出 Miss 數: {miss_count}")
                 break
