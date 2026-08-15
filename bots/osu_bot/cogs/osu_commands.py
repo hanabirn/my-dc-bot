@@ -59,6 +59,16 @@ def parse_mods(mods):
     return "".join(m.acronym for m in mods) or "NM"
 
 
+def error_embed(text):
+    """統一的錯誤訊息樣式，取代原本散落各處的純文字 ❌ 訊息"""
+    return discord.Embed(description=f"❌ {text}", color=discord.Color.red())
+
+
+def info_embed(text):
+    """統一的提示訊息樣式（不算錯誤，只是引導性質，例如「還沒有資料」）"""
+    return discord.Embed(description=text, color=discord.Color.from_rgb(255, 102, 170))
+
+
 def resolve_user_id(osu_name, osu_user_id):
     """user_scores() 只能吃數字 user_id，這裡確保一定有一個可用的 id"""
     if osu_user_id:
@@ -342,7 +352,7 @@ class OsuCommands(commands.Cog):
     @commands.command(name="link")
     async def link(self, ctx, *, osu_name: str = None):
         if not osu_name:
-            await ctx.send("❌ 使用方法錯誤！請輸入：`!link [你的 osu! 帳號名稱]`")
+            await ctx.send(embed=error_embed("使用方法錯誤！請輸入：`!link [你的 osu! 帳號名稱]`"))
             return
 
         user_id = str(ctx.author.id)
@@ -360,12 +370,12 @@ class OsuCommands(commands.Cog):
             )
             await ctx.send(embed=embed)
         except Exception as e:
-            await ctx.send(f"❌ 寫入資料庫失敗，錯誤原因: {e}")
+            await ctx.send(embed=error_embed(f"寫入資料庫失敗，錯誤原因: {e}"))
 
-    def _no_link_message(self, ctx, target):
+    def _no_link_embed(self, ctx, target):
         if target:
-            return f"❌ **{target.display_name}** 還沒有綁定 osu! 帳號。"
-        return f"❌ {ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link [你的 osu! 帳號]`"
+            return error_embed(f"**{target.display_name}** 還沒有綁定 osu! 帳號。")
+        return error_embed(f"{ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link [你的 osu! 帳號]`")
 
     # 2. 指令 !top（可選：!top @成員 查詢別人）
     @commands.command(name="top")
@@ -375,7 +385,7 @@ class OsuCommands(commands.Cog):
         user_data = ref.get()
 
         if not user_data:
-            await ctx.send(self._no_link_message(ctx, target))
+            await ctx.send(embed=self._no_link_embed(ctx, target))
             return
 
         osu_name = user_data.get('osu_name')
@@ -409,7 +419,7 @@ class OsuCommands(commands.Cog):
         user_data = ref.get()
 
         if not user_data:
-            await ctx.send(self._no_link_message(ctx, target))
+            await ctx.send(embed=self._no_link_embed(ctx, target))
             return
 
         osu_name = user_data.get('osu_name')
@@ -423,17 +433,17 @@ class OsuCommands(commands.Cog):
     @commands.command(name="compare", aliases=["c"])
     async def compare(self, ctx, target: discord.Member = None):
         if not target:
-            await ctx.send("❌ 使用方法錯誤！請標記你想對比的對象，例如：`!compare @成員名稱`")
+            await ctx.send(embed=error_embed("使用方法錯誤！請標記你想對比的對象，例如：`!compare @成員名稱`"))
             return
 
         my_data = db.reference(f'users/{ctx.author.id}').get()
         target_data = db.reference(f'users/{target.id}').get()
 
         if not my_data or not my_data.get('osu_name'):
-            await ctx.send(f"❌ {ctx.author.mention} 你還沒有綁定帳號喔！請先使用 `!link`")
+            await ctx.send(embed=self._no_link_embed(ctx, None))
             return
         if not target_data or not target_data.get('osu_name'):
-            await ctx.send(f"❌ 標記的成員 **{target.display_name}** 還沒有綁定 osu! 帳號。")
+            await ctx.send(embed=self._no_link_embed(ctx, target))
             return
 
         my_name = my_data.get('osu_name')
@@ -475,13 +485,17 @@ class OsuCommands(commands.Cog):
         ansi_text += "-------------+------------+------------\n"
 
         modes_label = ["⭕ Standard ", "🥁 Taiko    ", "🍎 Catch    ", "🎹 Mania    "]
+        my_wins = 0
+        target_wins = 0
         for i in range(4):
             if my_pp[i] > target_pp[i]:
                 p1_str = f"[1;32m{my_pp[i]:>8.1f}[0m"
                 p2_str = f"[1;31m{target_pp[i]:>8.1f}[0m"
+                my_wins += 1
             elif my_pp[i] < target_pp[i]:
                 p1_str = f"[1;31m{my_pp[i]:>8.1f}[0m"
                 p2_str = f"[1;32m{target_pp[i]:>8.1f}[0m"
+                target_wins += 1
             else:
                 p1_str = f"{my_pp[i]:>8.1f}"
                 p2_str = f"{target_pp[i]:>8.1f}"
@@ -493,6 +507,15 @@ class OsuCommands(commands.Cog):
         ansi_text += "```"
 
         embed.add_field(name="📊 四模式數據對比表", value=ansi_text, inline=False)
+
+        if my_total > target_total:
+            summary = f"🏆 **{my_name}** 贏了 {my_wins}/4 個模式，總 PP 領先 **{target_name}** {my_total - target_total:,.1f} pp！"
+        elif target_total > my_total:
+            summary = f"🏆 **{target_name}** 贏了 {target_wins}/4 個模式，總 PP 領先 **{my_name}** {target_total - my_total:,.1f} pp！"
+        else:
+            summary = f"🤝 **{my_name}** 與 **{target_name}** 總 PP 打成平手！"
+        embed.add_field(name="🎯 結論", value=summary, inline=False)
+
         await ctx.send(embed=embed)
 
     # 4. 指令 !leaderboard
@@ -500,7 +523,7 @@ class OsuCommands(commands.Cog):
     async def leaderboard(self, ctx):
         all_users = db.reference('users').get()
         if not all_users:
-            await ctx.send("❌ 目前資料庫中沒有任何玩家數據。")
+            await ctx.send(embed=error_embed("目前資料庫中沒有任何玩家數據。"))
             return
 
         leaderboard_list = []
@@ -517,7 +540,7 @@ class OsuCommands(commands.Cog):
                 })
 
         if not leaderboard_list:
-            await ctx.send("💡 尚未有人進行過 `!compare`，排行榜尚無數據，請先使用 `!compare` 來初始化分數！")
+            await ctx.send(embed=info_embed("💡 尚未有人進行過 `!compare`，排行榜尚無數據，請先使用 `!compare` 來初始化分數！"))
             return
 
         leaderboard_list.sort(key=lambda x: x['total_pp'], reverse=True)
@@ -538,11 +561,11 @@ class OsuCommands(commands.Cog):
             total = player['total_pp']
 
             if rank == 1:
-                rank_str = f"[1;33m#{rank:<2}[0m"
+                rank_str = f"[1;33m🥇 [0m"
             elif rank == 2:
-                rank_str = f"[1;36m#{rank:<2}[0m"
+                rank_str = f"[1;36m🥈 [0m"
             elif rank == 3:
-                rank_str = f"[1;31m#{rank:<2}[0m"
+                rank_str = f"[1;31m🥉 [0m"
             else:
                 rank_str = f"#{rank:<2}"
 
@@ -562,7 +585,7 @@ class OsuCommands(commands.Cog):
         user_data = ref.get()
 
         if not user_data:
-            await ctx.send(self._no_link_message(ctx, target))
+            await ctx.send(embed=self._no_link_embed(ctx, target))
             return
 
         osu_name = user_data.get('osu_name')
@@ -571,11 +594,11 @@ class OsuCommands(commands.Cog):
             entry = fetch_collection_summary(osu_name)
         except Exception as e:
             print(f"collections-list 查詢失敗: {e}")
-            await ctx.send("❌ 連線 osu-花火網頁 失敗，請稍後再試。")
+            await ctx.send(embed=error_embed("連線 osu-花火網頁 失敗，請稍後再試。"))
             return
 
         if not entry:
-            await ctx.send(f"💨 **{osu_name}** 目前還沒有在 osu-花火網頁 上發布圖庫收藏喔！")
+            await ctx.send(embed=info_embed(f"💨 **{osu_name}** 目前還沒有在 osu-花火網頁 上發布圖庫收藏喔！"))
             return
 
         tags = entry.get("tags") or []
