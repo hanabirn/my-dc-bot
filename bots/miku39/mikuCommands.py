@@ -112,6 +112,33 @@ def _today_str():
     # 用 UTC 日期當「一天」的邊界，簡單一致就好，不用特別對齊使用者時區
     return datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
+def _yesterday_str():
+    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
+
+# --- 每日簽到／連續天數：獨立於好感度等級之外的另一條每日習慣，中斷一天就
+# 從第 1 天重新算起。連續簽到的經驗值獎勵會遞增，但有上限，不會無止盡疊加。
+CHECKIN_PATH = 'miku_gacha/checkin'
+CHECKIN_BASE_EXP = 5
+CHECKIN_STREAK_EXP_CAP = 15
+CHECKIN_MILESTONE_DAYS = 7
+
+def _get_checkin_data(user_id):
+    if not firebase_admin._apps:
+        return None
+    try:
+        return db.reference(f'{CHECKIN_PATH}/{user_id}').get()
+    except Exception as e:
+        print(f"[MIKU39] 讀取簽到資料失敗: {e}")
+        return None
+
+def _save_checkin(user_id, date_str, streak):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{CHECKIN_PATH}/{user_id}').set({'date': date_str, 'streak': streak})
+    except Exception as e:
+        print(f"[MIKU39] 更新簽到資料失敗: {e}")
+
 # --- 好感度／羈絆等級系統：把 /運勢、/抽卡 這些互動串成一條養成線，每次使用
 # 都會累積經驗值，升級解鎖額外內容。等級公式用固定每級 EXP_PER_LEVEL 點經驗
 # （簡單好懂，/好感度 顯示進度條也方便）。
@@ -531,6 +558,41 @@ def register_commands(bot):
         total = len(BEAUTY_IMAGES) + len(custom_images)
         await ctx.send(f"🗑️ 已從精選圖庫移除這張圖！（目前精選圖庫共 {total} 張）")
 
+    @bot.hybrid_command(name="簽到", description="每日簽到，連續簽到經驗值獎勵會越來越多")
+    async def checkin_command(ctx):
+        uid = str(ctx.author.id)
+        today = _today_str()
+        data = _get_checkin_data(uid) or {}
+        last_date = data.get('date')
+        prev_streak = data.get('streak', 0)
+
+        if last_date == today:
+            embed = discord.Embed(
+                title="📅 今天已經簽到過囉！",
+                description=f"目前連續簽到 **{prev_streak}** 天，明天再來吧～",
+                color=discord.Color.from_str("#39C5BB")
+            )
+            await ctx.send(embed=embed)
+            return
+
+        streak = prev_streak + 1 if last_date == _yesterday_str() else 1
+        exp_gained = CHECKIN_BASE_EXP + min(streak, CHECKIN_STREAK_EXP_CAP)
+        _save_checkin(uid, today, streak)
+        _add_exp(uid, exp_gained)
+
+        embed = discord.Embed(
+            title="✅ 簽到成功！",
+            description=f"連續簽到 **{streak}** 天　獲得 **{exp_gained}** 點好感度經驗值",
+            color=discord.Color.from_str("#39C5BB")
+        )
+        if streak > 1 and streak % CHECKIN_MILESTONE_DAYS == 0:
+            embed.add_field(
+                name="🎉 連續里程碑！",
+                value=f"已經連續 {streak} 天了，Miku 好感動！繼續保持下去唷～",
+                inline=False
+            )
+        await ctx.send(embed=embed)
+
     @bot.hybrid_command(name="好感度", description="查看你跟 Miku 的羈絆等級與解鎖進度")
     async def affinity_command(ctx):
         uid = str(ctx.author.id)
@@ -570,7 +632,8 @@ def register_commands(bot):
         embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩，每天限抽一次（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
         embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫。每日限抽 {GACHA_DAILY_LIMIT} 次，連續 {GACHA_PITY_THRESHOLD} 次沒中精選圖庫會自動保底！", inline=False)
         embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
-        embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
+        embed.add_field(name="`/簽到`", value="每日簽到，連續簽到經驗值獎勵會越來越多，中斷一天就重新從第 1 天算起", inline=False)
+        embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡`、`/簽到` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
         owner_id = os.getenv("MIKU_OWNER_ID")
         if owner_id and str(ctx.author.id) == owner_id:
             embed.add_field(name="`/加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
