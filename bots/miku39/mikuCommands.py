@@ -64,6 +64,24 @@ except Exception as e:
     print(f"[MIKU39] osu! 戰績串接初始化失敗（將以純隨機運勢繼續運作）: {e}")
     _osu_api = None
 
+# --- 精選圖庫的線上新增功能：BEAUTY_IMAGES 是寫死在程式碼裡的固定清單，改它需要
+# 重新部署才會生效，所以新增的圖另外存進 Firebase（跟 osu! 戰績串接共用同一個
+# database，初始化流程見上面），bot 抽卡 時把兩份清單合併抽選，加圖立即生效。
+CUSTOM_IMAGES_PATH = 'miku_gacha/custom_images'
+
+def get_custom_images():
+    if not firebase_admin._apps:
+        return []
+    try:
+        data = db.reference(CUSTOM_IMAGES_PATH).get()
+        return data or []
+    except Exception as e:
+        print(f"[MIKU39] 讀取精選圖庫（Firebase）失敗: {e}")
+        return []
+
+def save_custom_images(images):
+    db.reference(CUSTOM_IMAGES_PATH).set(images)
+
 def load_user_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -215,7 +233,8 @@ async def handle_miku_commands(message: discord.Message, bot):
         # 確保 bot 抽卡 永遠不會因為外部 API 問題而完全失敗
         img_url = fetch_random_anime_image() if random.random() < 0.5 else None
         if not img_url:
-            img_url = random.choice(BEAUTY_IMAGES)
+            curated_pool = BEAUTY_IMAGES + get_custom_images()
+            img_url = random.choice(curated_pool)
         embed = discord.Embed(
             title="🎤 世界第一公主殿下 美圖抽卡 ♪",
             description="點擊按鈕或輸入指令可以收藏到珍藏庫喔！",
@@ -256,7 +275,36 @@ async def handle_miku_commands(message: discord.Message, bot):
         await message.reply(embed=view.get_embed(), view=view)
         return True
 
-    # 4. 指令選單
+    # 4. 加圖指令（只有小天地主人能用，見 MIKU_OWNER_ID 環境變數）
+    elif msg_str.startswith("bot 加圖"):
+        owner_id = os.getenv("MIKU_OWNER_ID")
+        if not owner_id or user_id != owner_id:
+            await message.reply("❌ 只有小天地主人才能新增精選圖庫喔！")
+            return True
+
+        url = msg_str[len("bot 加圖"):].strip()
+        if not url:
+            await message.reply("❌ 用法：`bot 加圖 [圖片網址]`")
+            return True
+        if not (url.startswith("http://") or url.startswith("https://")):
+            await message.reply("❌ 這不是一個有效的網址（必須以 http:// 或 https:// 開頭）")
+            return True
+        if not firebase_admin._apps:
+            await message.reply("❌ Firebase 尚未設定好，暫時無法新增圖庫（不影響現有的 bot 抽卡）。")
+            return True
+
+        custom_images = get_custom_images()
+        if url in BEAUTY_IMAGES or url in custom_images:
+            await message.reply("⚠️ 這張圖片網址已經在精選圖庫裡囉！")
+            return True
+
+        custom_images.append(url)
+        save_custom_images(custom_images)
+        total = len(BEAUTY_IMAGES) + len(custom_images)
+        await message.reply(f"💚 成功加入精選圖庫！（目前精選圖庫共 {total} 張，立即生效）")
+        return True
+
+    # 5. 指令選單
     elif msg_str in ("bot 選單", "bot help", "bot 指令"):
         embed = discord.Embed(
             title="🎤 MIKU39 指令選單",
@@ -266,6 +314,8 @@ async def handle_miku_commands(message: discord.Message, bot):
         embed.add_field(name="`bot 運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `!link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
         embed.add_field(name="`bot 抽卡`", value="隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫", inline=False)
         embed.add_field(name="`bot 珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
+        if os.getenv("MIKU_OWNER_ID") and user_id == os.getenv("MIKU_OWNER_ID"):
+            embed.add_field(name="`bot 加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
         embed.set_footer(text="💚 想再看一次這份選單，隨時輸入 bot 選單")
         await message.reply(embed=embed)
         return True
