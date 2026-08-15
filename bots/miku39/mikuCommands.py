@@ -5,6 +5,7 @@ import random
 import json
 import os
 import requests
+from datetime import datetime, timezone
 from googleSearch import BEAUTY_IMAGES
 
 import firebase_admin
@@ -107,6 +108,101 @@ def _set_pity_count(user_id, count):
     except Exception as e:
         print(f"[MIKU39] 更新保底次數失敗: {e}")
 
+def _today_str():
+    # 用 UTC 日期當「一天」的邊界，簡單一致就好，不用特別對齊使用者時區
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+# --- 好感度／羈絆等級系統：把 /運勢、/抽卡 這些互動串成一條養成線，每次使用
+# 都會累積經驗值，升級解鎖額外內容。等級公式用固定每級 EXP_PER_LEVEL 點經驗
+# （簡單好懂，/好感度 顯示進度條也方便）。
+AFFINITY_PATH = 'miku_gacha/affinity'
+EXP_PER_LEVEL = 100
+FORTUNE_EXP = 5
+GACHA_EXP = 3
+
+AFFINITY_UNLOCKS = [
+    (5, "🔮 隱藏籤詩"),
+    (10, "🎯 抽卡保底門檻降低 1 次"),
+    (20, "🎁 每日抽卡上限 +3"),
+    (39, "💫 特殊稱號＋隱藏彩蛋"),
+]
+
+def _get_exp(user_id):
+    if not firebase_admin._apps:
+        return 0
+    try:
+        return db.reference(f'{AFFINITY_PATH}/{user_id}').get() or 0
+    except Exception as e:
+        print(f"[MIKU39] 讀取好感度失敗: {e}")
+        return 0
+
+def _add_exp(user_id, amount):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{AFFINITY_PATH}/{user_id}').set(_get_exp(user_id) + amount)
+    except Exception as e:
+        print(f"[MIKU39] 更新好感度失敗: {e}")
+
+def _level_from_exp(exp):
+    return exp // EXP_PER_LEVEL + 1
+
+def _pity_threshold_for_level(level):
+    return GACHA_PITY_THRESHOLD - 1 if level >= 10 else GACHA_PITY_THRESHOLD
+
+def _gacha_daily_limit_for_level(level):
+    return GACHA_DAILY_LIMIT + 3 if level >= 20 else GACHA_DAILY_LIMIT
+
+# --- /運勢 每日限抽一次：不然「今日運勢」的「今日」就沒意義了，也順便堵住
+# 用它無限刷好感度經驗值的漏洞。存的是完整籤詩內容（不只索引），這樣同一天
+# 重複查詢可以原封不動地重新顯示同一份結果。
+DAILY_FORTUNE_PATH = 'miku_gacha/daily_fortune'
+
+def _get_saved_fortune(user_id):
+    if not firebase_admin._apps:
+        return None
+    try:
+        data = db.reference(f'{DAILY_FORTUNE_PATH}/{user_id}').get()
+        if data and data.get('date') == _today_str():
+            return data.get('fortune')
+        return None
+    except Exception as e:
+        print(f"[MIKU39] 讀取今日運勢失敗: {e}")
+        return None
+
+def _save_today_fortune(user_id, fortune):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{DAILY_FORTUNE_PATH}/{user_id}').set({'date': _today_str(), 'fortune': fortune})
+    except Exception as e:
+        print(f"[MIKU39] 儲存今日運勢失敗: {e}")
+
+# --- /抽卡 每日次數上限：原本完全沒有限制、可以無限狂抽，好感度系統上線後
+# 如果不擋，會變成靠瘋狂抽卡就能無限刷經驗值、失去升級的意義。
+GACHA_DAILY_LIMIT = 10
+DAILY_DRAWS_PATH = 'miku_gacha/daily_draws'
+
+def _get_daily_draw_count(user_id):
+    if not firebase_admin._apps:
+        return 0
+    try:
+        data = db.reference(f'{DAILY_DRAWS_PATH}/{user_id}').get()
+        if data and data.get('date') == _today_str():
+            return data.get('count', 0)
+        return 0
+    except Exception as e:
+        print(f"[MIKU39] 讀取每日抽卡次數失敗: {e}")
+        return 0
+
+def _increment_daily_draw_count(user_id, current_count):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{DAILY_DRAWS_PATH}/{user_id}').set({'date': _today_str(), 'count': current_count + 1})
+    except Exception as e:
+        print(f"[MIKU39] 更新每日抽卡次數失敗: {e}")
+
 # --- 珍藏庫（每位使用者收藏的美圖清單）：原本存在本機的 userPools.json，
 # Render 免費方案的容器磁碟是 ephemeral 的，重新部署一次舊資料就整個消失。
 # 改存 Firebase，per-user 一個路徑，跟保底次數/精選圖庫用同一顆資料庫，
@@ -161,6 +257,12 @@ FORTUNE_LIST = [
     {"type": "⚡ 大凶", "desc": "嗚哇！今天打歌手感不太對勁呢... 快去吃碗大蔥拉麵補充元氣，今天先別強求 pp 了！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"}
 ]
 
+# 好感度 Lv.5 起解鎖的隱藏籤詩，混在一般籤詩池裡有機率額外抽到（見 _pick_fortune）
+HIDDEN_FORTUNE_LIST = [
+    {"type": "💚 羈絆吉", "desc": "跟 Miku 之間的默契已經培養起來了呢！今天不管打什麼曲子，感覺都會被溫柔地包圍著唷～", "gif": "https://s1.aigei.com/src/img/gif/16/1644ae8483424bfc9c17c770c3d82301.gif"},
+    {"type": "🎋 特別吉", "desc": "身為認識這麼久的老朋友，Miku 偷偷告訴你一個秘密：今天很適合挑戰個人最佳紀錄喔！", "gif": "https://imgs.aixifan.com/content/2020_7_26/1.5957295579034555E9.gif"},
+]
+
 # FORTUNE_LIST 索引對應的好/壞籤（依內容描述分類，不是單純依序排列——
 # 「末吉」描述偏負面，「吉」描述偏正常/正面，所以它們的順序跟字面吉凶不完全一致）
 _GOOD_FORTUNE_INDICES = {0, 1, 2, 4}   # 大吉、中吉、小吉、吉
@@ -191,14 +293,20 @@ def _get_luck_bias(user_id):
     except Exception:
         return None
 
-def _pick_fortune(bias):
+def _pick_fortune(bias, level=1):
     if bias == 'up':
         weights = [3 if i in _GOOD_FORTUNE_INDICES else 1 for i in range(len(FORTUNE_LIST))]
-        return random.choices(FORTUNE_LIST, weights=weights, k=1)[0]
-    if bias == 'down':
+        result = random.choices(FORTUNE_LIST, weights=weights, k=1)[0]
+    elif bias == 'down':
         weights = [3 if i in _BAD_FORTUNE_INDICES else 1 for i in range(len(FORTUNE_LIST))]
-        return random.choices(FORTUNE_LIST, weights=weights, k=1)[0]
-    return random.choice(FORTUNE_LIST)
+        result = random.choices(FORTUNE_LIST, weights=weights, k=1)[0]
+    else:
+        result = random.choice(FORTUNE_LIST)
+    # 好感度 Lv.5 起，有機率把結果換成隱藏籤詩（不動原本的好/壞籤權重邏輯，
+    # 純粹是抽完之後的一次額外覆蓋機會）
+    if level >= 5 and random.random() < 0.15:
+        result = random.choice(HIDDEN_FORTUNE_LIST)
+    return result
 
 # 🗂️ 珍藏庫互動按鈕 View 類別（含刪除功能）
 class PoolView(discord.ui.View):
@@ -279,27 +387,48 @@ def register_commands(bot):
     """把 MIKU39 的指令註冊到 bot 上——用 hybrid_command 讓每個指令同時支援
     原本的 `bot 指令名` 文字前綴跟新的 `/指令名` Slash 介面，兩種叫法共用同一份邏輯。"""
 
-    @bot.hybrid_command(name="運勢", description="抽一次今日運勢籤詩")
+    @bot.hybrid_command(name="運勢", description="抽一次今日運勢籤詩（每天限抽一次，重複查詢會顯示今天已抽過的結果）")
     async def fortune_command(ctx):
-        bias = _get_luck_bias(str(ctx.author.id))
-        fortune = _pick_fortune(bias)
+        uid = str(ctx.author.id)
+        saved = _get_saved_fortune(uid)
+        bias = None
+        if saved is None:
+            bias = _get_luck_bias(uid)
+            level = _level_from_exp(_get_exp(uid))
+            fortune = _pick_fortune(bias, level)
+            _save_today_fortune(uid, fortune)
+            _add_exp(uid, FORTUNE_EXP)
+        else:
+            fortune = saved
+
         embed = discord.Embed(
             title=f"🎤 Miku39 占卜結果：{fortune['type']}",
             description=fortune['desc'],
             color=discord.Color.from_str("#39C5BB")
         )
         embed.set_image(url=fortune['gif'])
-        if bias == 'up':
+        if saved is not None:
+            embed.set_footer(text="📅 今天已經抽過囉，這是同一份結果～明天再來抽新的吧！")
+        elif bias == 'up':
             embed.set_footer(text="💫 偵測到你最近 osu! 排名進步了，運勢也跟著沾光～")
         elif bias == 'down':
             embed.set_footer(text="😮‍💨 偵測到你最近 osu! 排名有點退步，Miku 悄悄幫你加油中...")
         await ctx.send(embed=embed)
 
-    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖，可以收藏到珍藏庫（連續沒中精選圖會觸發保底）")
+    @bot.hybrid_command(name="抽卡", description="隨機抽一張美圖，可以收藏到珍藏庫（每日有次數上限，連續沒中精選圖會觸發保底）")
     async def gacha_command(ctx):
         uid = str(ctx.author.id)
+        level = _level_from_exp(_get_exp(uid))
+        daily_limit = _gacha_daily_limit_for_level(level)
+        draw_count = _get_daily_draw_count(uid)
+
+        if draw_count >= daily_limit:
+            await ctx.send(f"💤 今天已經抽了 {draw_count} 次囉，明天再來吧！（今日上限：{daily_limit} 次，好感度 Lv.20 起上限會提升）")
+            return
+
+        pity_threshold = _pity_threshold_for_level(level)
         pity_count = _get_pity_count(uid)
-        pity_triggered = pity_count + 1 >= GACHA_PITY_THRESHOLD
+        pity_triggered = pity_count + 1 >= pity_threshold
 
         # 保底還沒觸發時維持原本邏輯：一半機率嘗試即時從網路抓一張新圖，
         # 抓不到（逾時/斷線）就退回精選圖庫，確保這個指令永遠不會因為外部 API 問題而完全失敗
@@ -317,6 +446,10 @@ def register_commands(bot):
             is_curated = True
             _set_pity_count(uid, 0)
 
+        _increment_daily_draw_count(uid, draw_count)
+        _add_exp(uid, GACHA_EXP)
+        draws_used = draw_count + 1
+
         embed = discord.Embed(
             title="🎤 世界第一公主殿下 美圖抽卡 ♪",
             description="點擊按鈕或輸入指令可以收藏到珍藏庫喔！",
@@ -324,11 +457,11 @@ def register_commands(bot):
         )
         embed.set_image(url=img_url)
         if is_curated and pity_triggered:
-            embed.set_footer(text="🌟 保底觸發！連續沒中精選圖庫，這次直接送上精選美圖～（保底進度已重置）")
+            embed.set_footer(text=f"🌟 保底觸發！連續沒中精選圖庫，這次直接送上精選美圖～（保底進度已重置）今日抽卡：{draws_used}/{daily_limit}")
         elif is_curated:
-            embed.set_footer(text="✨ 精選圖庫出貨！（保底進度已重置）")
+            embed.set_footer(text=f"✨ 精選圖庫出貨！（保底進度已重置）今日抽卡：{draws_used}/{daily_limit}")
         else:
-            embed.set_footer(text=f"🎲 保底進度：{pity_count}/{GACHA_PITY_THRESHOLD}（連續抽不到精選圖庫達 {GACHA_PITY_THRESHOLD} 次會自動保底送上精選美圖）")
+            embed.set_footer(text=f"🎲 保底進度：{pity_count}/{pity_threshold}　今日抽卡：{draws_used}/{daily_limit}")
         await ctx.send(embed=embed, view=CollectView(img_url))
 
     @bot.hybrid_command(name="珍藏庫", description="翻看你收藏的美圖")
@@ -392,6 +525,35 @@ def register_commands(bot):
         total = len(BEAUTY_IMAGES) + len(custom_images)
         await ctx.send(f"🗑️ 已從精選圖庫移除這張圖！（目前精選圖庫共 {total} 張）")
 
+    @bot.hybrid_command(name="好感度", description="查看你跟 Miku 的羈絆等級與解鎖進度")
+    async def affinity_command(ctx):
+        uid = str(ctx.author.id)
+        exp = _get_exp(uid)
+        level = _level_from_exp(exp)
+        exp_into_level = exp % EXP_PER_LEVEL
+        exp_to_next = EXP_PER_LEVEL - exp_into_level
+
+        bar_filled = exp_into_level * 10 // EXP_PER_LEVEL
+        bar = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
+
+        embed = discord.Embed(
+            title=f"💚 與 Miku 的羈絆　Lv.{level}",
+            description=f"{bar}\n{exp_into_level}/{EXP_PER_LEVEL} exp（還差 {exp_to_next} 點升級）",
+            color=discord.Color.from_str("#39C5BB")
+        )
+        unlock_text = "\n".join(
+            f"{'✅' if level >= lv else '🔒'} Lv.{lv}　{name}" for lv, name in AFFINITY_UNLOCKS
+        )
+        embed.add_field(name="解鎖進度", value=unlock_text, inline=False)
+        if level >= 39:
+            embed.add_field(
+                name="🌟 39 稱號：唯一的觀眾",
+                value="不管唱多少遍，你永遠都在最前排守候——謝謝你，39 (Thank you) ♪",
+                inline=False
+            )
+        embed.set_footer(text="💡 使用 /運勢、/抽卡 都可以累積好感度經驗值")
+        await ctx.send(embed=embed)
+
     @bot.hybrid_command(name="選單", aliases=["help", "指令"], description="顯示 MIKU39 的指令說明")
     async def menu_command(ctx):
         embed = discord.Embed(
@@ -399,9 +561,10 @@ def register_commands(bot):
             description="以下是目前可以使用的指令：\n──────────────────",
             color=discord.Color.from_str("#39C5BB")
         )
-        embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
-        embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫。連續 {GACHA_PITY_THRESHOLD} 次沒中精選圖庫會自動保底！", inline=False)
+        embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩，每天限抽一次（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
+        embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫。每日限抽 {GACHA_DAILY_LIMIT} 次，連續 {GACHA_PITY_THRESHOLD} 次沒中精選圖庫會自動保底！", inline=False)
         embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
+        embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
         owner_id = os.getenv("MIKU_OWNER_ID")
         if owner_id and str(ctx.author.id) == owner_id:
             embed.add_field(name="`/加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
