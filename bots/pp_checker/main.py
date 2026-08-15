@@ -34,7 +34,7 @@ OSU_CLIENT_ID = int(OSU_CLIENT_ID)
 osu_api = Ossapi(OSU_CLIENT_ID, OSU_CLIENT_SECRET)
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 if not os.path.exists("maps"):
     os.makedirs("maps")
@@ -89,6 +89,19 @@ async def on_command_error(ctx, error):
 @bot.hybrid_command(description="測試機器人是否存活")
 async def ping(ctx):
     await ctx.send("pong! 🏓")
+
+@bot.hybrid_command(name="help", description="顯示 PP查詢員 的指令選單")
+async def help_command(ctx):
+    embed = discord.Embed(
+        title="📖 PP查詢員 指令選單",
+        description="以下是目前可以使用的指令：\n──────────────────",
+        color=discord.Color.from_rgb(255, 102, 170)
+    )
+    embed.add_field(name="`/ping`", value="測試機器人是否存活", inline=False)
+    embed.add_field(name="`/acc`", value="計算指定圖／ACC／Mod／Combo／Miss 組合下的預估 PP", inline=False)
+    embed.add_field(name="`/rec`", value="從 osu-花火網頁 的農圖庫推薦刷分地圖，可指定目標 PP 或 PP 範圍、Mod", inline=False)
+    embed.set_footer(text="🎀 想再看一次這份選單，隨時輸入 /help")
+    await ctx.send(embed=embed)
 
 # --- 1. 預估 PP 查詢指令 (!acc) ---
 @bot.hybrid_command(description="計算指定圖／ACC／Mod／combo／miss 組合下的預估 PP")
@@ -201,8 +214,11 @@ def format_length(seconds):
 @bot.hybrid_command(description="從農圖庫推薦圖：單一目標 PP 隨機抽一張，或用 最小-最大 列出範圍內的圖")
 @app_commands.describe(
     target_pp="目標 PP（例如 400）或 PP 範圍（例如 200-300）",
-    mods="Mod 組合：NM/DT/HD/HDDT/HR/HDHR（可省略，預設 NM）",
+    mods="Mod 組合（可省略，預設 NM）",
 )
+@app_commands.choices(mods=[
+    app_commands.Choice(name=m, value=m) for m in ["NM", "DT", "HD", "HDDT", "HR", "HDHR"]
+])
 async def rec(ctx, target_pp: str, mods: str = "NM"):
     """
     用法:
