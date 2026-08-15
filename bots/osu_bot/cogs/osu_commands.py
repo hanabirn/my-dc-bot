@@ -70,6 +70,13 @@ def info_embed(text):
     return discord.Embed(description=text, color=discord.Color.from_rgb(255, 102, 170))
 
 
+def country_flag(country_code):
+    """把 ISO 3166-1 alpha-2 國碼（例如 TW）轉成國旗 emoji，查不到就回傳空字串"""
+    if not country_code or len(country_code) != 2 or not country_code.isalpha():
+        return ""
+    return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in country_code.upper())
+
+
 def resolve_user_id(osu_name, osu_user_id):
     """user_scores() 只能吃數字 user_id，這裡確保一定有一個可用的 id"""
     if osu_user_id:
@@ -585,17 +592,20 @@ class OsuCommands(commands.Cog):
 
         def get_all_modes_pp(osu_name):
             pp_list = [0.0, 0.0, 0.0, 0.0]
+            country = None
             for mode_id, (mode_key, _) in OSU_MODES.items():
                 try:
                     user = osu_api.user(osu_name, mode=mode_key, key="username")
                     if user.statistics:
                         pp_list[mode_id] = user.statistics.pp or 0.0
+                    if country is None:
+                        country = user.country_code
                 except Exception:
                     pass
-            return pp_list
+            return pp_list, country
 
-        my_pp = get_all_modes_pp(my_name)
-        target_pp = get_all_modes_pp(target_name)
+        my_pp, my_country = get_all_modes_pp(my_name)
+        target_pp, target_country = get_all_modes_pp(target_name)
 
         my_total = sum(my_pp)
         target_total = sum(target_pp)
@@ -606,10 +616,13 @@ class OsuCommands(commands.Cog):
         db.reference(f'users/{target.id}/modes_pp').set(target_pp)
         db.reference(f'users/{target.id}/total_pp').set(target_total)
 
+        my_flag = country_flag(my_country)
+        target_flag = country_flag(target_country)
+
         embed = discord.Embed(
             title="⚔️ 玩家實力大對決",
             color=discord.Color.gold(),
-            description=f"**{my_name}** vs  **{target_name}**\n──────────────────"
+            description=f"**{my_flag} {my_name}** vs  **{target_flag} {target_name}**\n──────────────────"
         )
 
         ansi_text = "```ansi\n"
