@@ -57,11 +57,15 @@ RANK_ANSI_STRINGS = {
 # 網址格式跟該網站前端 js/tournaments.js 用的完全一致，避免自己亂猜。
 # ========================================================
 TOURNAMENT_CHANNEL_ID = 1538062072326397982
+NEWS_CHANNEL_ID = 1523796799096230000
 WYBIN_TOURNAMENTS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/wybin-tournaments"
 OSU_FORUM_TOURNAMENTS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/osu-tournaments"
+OSU_NEWS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/osu-news"
+OSU_MAPPER_STATUS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/osu-mapper-status"
 WYBIN_TOURNAMENT_BASE = "https://wybin.xyz/tournaments/"
 WYBIN_UPLOADS_BASE = "https://wybin.xyz/uploads/tournaments/"
 OSU_FORUM_TOPIC_BASE = "https://osu.ppy.sh/community/forums/topics/"
+OSU_NEWS_PAGE_BASE = "https://osu.ppy.sh/home/news/"
 
 WYBIN_GAMEMODE_NAMES = {0: "⭕ osu!", 1: "🥁 Taiko", 2: "🍎 Catch", 3: "🎹 Mania"}
 
@@ -518,6 +522,10 @@ class OsuCommands(commands.Cog):
             await self._check_forum_tournaments()
         except Exception as e:
             print(f"[TournamentAnnounce] 論壇檢查流程發生未預期錯誤: {e}")
+        try:
+            await self._check_osu_news()
+        except Exception as e:
+            print(f"[TournamentAnnounce] osu! 新聞檢查流程發生未預期錯誤: {e}")
 
     @check_tournaments.before_loop
     async def before_check_tournaments(self):
@@ -616,6 +624,52 @@ class OsuCommands(commands.Cog):
         embed.add_field(name="💬 回覆數", value=f"{topic.get('post_count', 0)}", inline=True)
         embed.add_field(name="👁 瀏覽數", value=f"{topic.get('views', 0)}", inline=True)
         embed.set_footer(text="資料來源：osu! 官方論壇 Tournaments 討論區")
+        return embed
+
+    async def _check_osu_news(self):
+        channel = self.bot.get_channel(NEWS_CHANNEL_ID)
+        if not channel:
+            print(f"[TournamentAnnounce] 找不到頻道 {NEWS_CHANNEL_ID}")
+            return
+        try:
+            resp = requests.get(OSU_NEWS_API, timeout=15)
+            resp.raise_for_status()
+            posts = resp.json().get("news_posts", [])
+        except Exception as e:
+            print(f"[TournamentAnnounce] osu! 新聞查詢失敗: {e}")
+            return
+
+        seen_ref = db.reference('tournament_announce/news_seen')
+        seen = seen_ref.get() or {}
+        is_first_run = len(seen) == 0
+        new_posts = [p for p in posts if str(p.get('id')) not in seen]
+
+        for p in posts:
+            seen[str(p.get('id'))] = True
+        seen_ref.set(seen)
+
+        if is_first_run:
+            print(f"[TournamentAnnounce] osu! 新聞首次執行，建立 {len(posts)} 筆基準，不發送公告")
+            return
+
+        for p in reversed(new_posts):
+            try:
+                await channel.send(embed=self._build_news_embed(p))
+            except Exception as e:
+                print(f"[TournamentAnnounce] 發送新聞公告失敗: {e}")
+
+    def _build_news_embed(self, post):
+        embed = discord.Embed(
+            title=f"📰 {post.get('title') or '未知標題'}",
+            url=OSU_NEWS_PAGE_BASE + str(post.get('slug', '')),
+            description=post.get('preview') or "",
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        image = post.get('first_image')
+        if image:
+            embed.set_image(url=image)
+        author = post.get('author')
+        embed.set_footer(text=f"作者：{author} ｜ 資料來源：osu! 官方新聞" if author else "資料來源：osu! 官方新聞")
         return embed
 
     # 1. 指令 !link
@@ -919,6 +973,49 @@ class OsuCommands(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    # 5.5 指令 !mapper（查詢圖主目前的墳場圖／Loved 圖）
+    @commands.hybrid_command(name="mapper", description="查詢圖主目前的墳場圖／Loved 圖")
+    @app_commands.describe(username="osu! 圖主的使用者名稱")
+    async def mapper(self, ctx, *, username: str):
+        try:
+            resp = requests.get(OSU_MAPPER_STATUS_API, params={"username": username}, timeout=15)
+            if resp.status_code == 404:
+                await ctx.send(embed=error_embed(f"找不到圖主 **{username}**，請確認名稱是否正確。"))
+                return
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"[mapper] 查詢失敗: {e}")
+            await ctx.send(embed=error_embed("連線 osu-花火網頁 失敗，請稍後再試。"))
+            return
+
+        graveyard = data.get("graveyard") or []
+        loved = data.get("loved") or []
+        user_id = data.get("userId")
+
+        embed = discord.Embed(
+            title=f"🎨 {username} 的製圖狀態",
+            url=f"https://osu.ppy.sh/users/{user_id}" if user_id else None,
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+
+        def format_sets(sets):
+            lines = [f"• [{s.get('artist')} - {s.get('title')}](https://osu.ppy.sh/beatmapsets/{s.get('id')})" for s in sets[:10]]
+            return "\n".join(lines)
+
+        if graveyard:
+            embed.add_field(name=f"🪦 墳場圖（{len(graveyard)}）", value=format_sets(graveyard), inline=False)
+        else:
+            embed.add_field(name="🪦 墳場圖", value="目前沒有墳場圖", inline=False)
+
+        if loved:
+            embed.add_field(name=f"💖 Loved 圖（{len(loved)}）", value=format_sets(loved), inline=False)
+        else:
+            embed.add_field(name="💖 Loved 圖", value="目前沒有 Loved 圖", inline=False)
+
+        embed.set_footer(text="資料來源：osu-花火網頁（最多各顯示 10 張）")
+        await ctx.send(embed=embed)
+
     # 6. 指令 !help（指令選單）
     @commands.hybrid_command(name="help", aliases=["menu", "指令"], description="顯示 Osu Bot 的指令選單")
     async def help_command(self, ctx):
@@ -934,6 +1031,7 @@ class OsuCommands(commands.Cog):
         embed.add_field(name="`!compare @成員`（別名 `!c`）", value="跟指定成員比較四模式 PP", inline=False)
         embed.add_field(name="`!leaderboard`（別名 `!lb`）", value="伺服器四模式綜合 PP 排行榜 Top 10", inline=False)
         embed.add_field(name="`!collections [@成員]`（別名 `!col`）", value="查詢在 osu-花火網頁 上發布的圖庫收藏摘要，一樣可以查別人", inline=False)
+        embed.add_field(name="`!mapper [使用者名稱]`", value="查詢圖主目前的墳場圖／Loved 圖", inline=False)
         embed.set_footer(text="🎀 想再看一次這份選單，隨時輸入 !help")
         await ctx.send(embed=embed)
 
