@@ -107,18 +107,48 @@ def _set_pity_count(user_id, count):
     except Exception as e:
         print(f"[MIKU39] 更新保底次數失敗: {e}")
 
-def load_user_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+# --- 珍藏庫（每位使用者收藏的美圖清單）：原本存在本機的 userPools.json，
+# Render 免費方案的容器磁碟是 ephemeral 的，重新部署一次舊資料就整個消失。
+# 改存 Firebase，per-user 一個路徑，跟保底次數/精選圖庫用同一顆資料庫，
+# 讀寫都只動單一使用者的節點，不用像本機版那樣每次都整包讀寫所有人的資料。
+COLLECTIONS_PATH = 'miku_gacha/collections'
 
-def save_user_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+def get_user_collection(user_id):
+    if not firebase_admin._apps:
+        return []
+    try:
+        data = db.reference(f'{COLLECTIONS_PATH}/{user_id}').get()
+        return data or []
+    except Exception as e:
+        print(f"[MIKU39] 讀取珍藏庫失敗: {e}")
+        return []
+
+def save_user_collection(user_id, images):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{COLLECTIONS_PATH}/{user_id}').set(images)
+    except Exception as e:
+        print(f"[MIKU39] 更新珍藏庫失敗: {e}")
+
+def _migrate_local_collections_to_firebase():
+    """一次性搬遷：如果容器裡還留著舊版的 userPools.json，且 Firebase 那邊的
+    珍藏庫路徑目前是空的，就把本機資料搬過去，避免這次改版直接把使用者手上
+    的珍藏庫歸零。搬完之後這個檔案就不會再被讀寫，可以安全刪除。"""
+    if not firebase_admin._apps or not os.path.exists(DATA_FILE):
+        return
+    try:
+        if db.reference(COLLECTIONS_PATH).get():
+            return  # Firebase 已經有資料了，不要覆蓋
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            local_data = json.load(f)
+        if local_data:
+            db.reference(COLLECTIONS_PATH).set(local_data)
+            print(f"[MIKU39] 已將本機珍藏庫資料（{len(local_data)} 位使用者）搬遷至 Firebase")
+    except Exception as e:
+        print(f"[MIKU39] 珍藏庫資料搬遷失敗: {e}")
+
+_migrate_local_collections_to_firebase()
 
 # 🎲 7種運勢抽籤
 FORTUNE_LIST = [
@@ -201,17 +231,13 @@ class PoolView(discord.ui.View):
     @discord.ui.button(label="🗑️ 移除這張", style=discord.ButtonStyle.danger)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         removed_url = self.card_list[self.current_index]
-        
+
         # 從內存的卡片列表中移除
         self.card_list.remove(removed_url)
-        
-        # 同步更新 JSON 檔案
-        data = load_user_data()
-        uid = str(self.author_id)
-        if uid in data and removed_url in data[uid]:
-            data[uid].remove(removed_url)
-            save_user_data(data)
-            
+
+        # 同步更新 Firebase
+        save_user_collection(str(self.author_id), self.card_list)
+
         # 檢查刪除後是否還有剩下圖片
         if not self.card_list:
             # 沒圖片了，直接更新為空空如也的狀態，並移除按鈕
@@ -240,14 +266,12 @@ class CollectView(discord.ui.View):
     @discord.ui.button(label="💖 收藏這張美圖", style=discord.ButtonStyle.success)
     async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
-        data = load_user_data()
-        if uid not in data:
-            data[uid] = []
-        if self.url in data[uid]:
+        collection = get_user_collection(uid)
+        if self.url in collection:
             await interaction.response.send_message("✨ 這張圖已經在你的珍藏庫裡囉！", ephemeral=True)
         else:
-            data[uid].append(self.url)
-            save_user_data(data)
+            collection.append(self.url)
+            save_user_collection(uid, collection)
             await interaction.response.send_message("💖 成功將美圖收藏至你的個人珍藏庫！", ephemeral=True)
 
 
@@ -309,8 +333,7 @@ def register_commands(bot):
 
     @bot.hybrid_command(name="珍藏庫", description="翻看你收藏的美圖")
     async def collection_command(ctx):
-        data = load_user_data()
-        user_cards = data.get(str(ctx.author.id), [])
+        user_cards = get_user_collection(str(ctx.author.id))
 
         if not user_cards:
             await ctx.send("💨 你的珍藏庫目前空空如也呢！快使用 `/抽卡` 來收集公主殿下的美圖吧！")
