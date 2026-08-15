@@ -3,6 +3,7 @@ import urllib.request
 import random
 import json
 import glob as glob_mod
+import requests
 import discord
 from discord.ext import commands
 from ossapi import Ossapi, Mod
@@ -169,26 +170,19 @@ def load_all_maps():
                     all_maps.append(m)
     return all_maps
 
-def fetch_beatmap_info(beatmap_id):
-    if not hasattr(fetch_beatmap_info, "cache"):
-        fetch_beatmap_info.cache = {}
-    if beatmap_id in fetch_beatmap_info.cache:
-        return fetch_beatmap_info.cache[beatmap_id]
-    try:
-        bm = osu_api.beatmap(beatmap_id)
-        bs = bm.beatmapset()
-        info = {
-            "artist": bs.artist,
-            "title": bs.title,
-            "version": bm.version,
-            "star_rating": bm.difficulty_rating,
-            "bpm": bs.bpm,
-            "length": bm.total_length,
-        }
-        fetch_beatmap_info.cache[beatmap_id] = info
-        return info
-    except Exception:
-        return None
+# osu-花火網頁 的農圖庫 API：由該網站的 farm-crawl-cron 每 10 分鐘自動爬蟲更新，
+# 資料本身已經內含 title/artist/version，!rec 不用再自己額外查一次 beatmap 資訊
+FARM_MAPS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/farm-maps-list"
+
+def fetch_farm_maps(pp_min=None, pp_max=None, mods="NM", mode="osu"):
+    params = {"mode": mode, "mods": mods, "page": 0}
+    if pp_min is not None:
+        params["ppMin"] = pp_min
+    if pp_max is not None:
+        params["ppMax"] = pp_max
+    resp = requests.get(FARM_MAPS_API, params=params, timeout=10)
+    resp.raise_for_status()
+    return resp.json().get("items", [])
 
 # ============ Discord Bot 指令 ============
 @bot.event
@@ -251,6 +245,7 @@ async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = ""):
         await ctx.send("❌ 計算過程中發生錯誤。")
 
 # --- 2. 分類毒瘤抽圖指令 (!rec) ---
+# 資料來源改成 osu-花火網頁 的農圖庫 API（自動爬蟲更新），不再讀本地 maps_*.json
 @bot.command()
 async def rec(ctx, target_pp: str):
     """
@@ -258,7 +253,7 @@ async def rec(ctx, target_pp: str):
       !rec 400        → 隨機抽一張 ~400pp 的圖
       !rec 200-300    → 列出 200~300pp 的所有圖（最多 10 張，每張皆含橫幅）
     """
-    # --- 新用法：範圍搜尋 ---
+    # --- 範圍搜尋 ---
     if "-" in target_pp:
         try:
             parts = target_pp.split("-")
@@ -266,124 +261,96 @@ async def rec(ctx, target_pp: str):
         except ValueError:
             return await ctx.send("❌ 格式錯誤，請用 `!rec 最小PP-最大PP`，例如 `!rec 200-300`")
 
-        await ctx.send(f"🔍 正在搜尋 {min_pp}~{max_pp}pp 的地圖...")
+        await ctx.send(f"🔍 正在從網站農圖庫搜尋 {min_pp}~{max_pp}pp 的地圖...")
 
-        # 範圍搜尋模式
-        all_maps = load_all_maps()
-        suitable = [m for m in all_maps if min_pp <= m.get('p', 0) <= max_pp]
+        try:
+            suitable = fetch_farm_maps(pp_min=min_pp, pp_max=max_pp)
+        except Exception as e:
+            print(f"farm-maps-list 查詢失敗: {e}")
+            return await ctx.send("❌ 連線農圖庫網站失敗，請稍後再試。")
 
         if not suitable:
             return await ctx.send(f"😢 找不到 {min_pp}~{max_pp}pp 範圍內的地圖。")
 
-        # 【修正點 1】先徹底打亂符合條件的清單，再抽取前 10 張，保證每次都隨機
+        # 先徹底打亂符合條件的清單，再抽取前 10 張，保證每次都隨機
         random.shuffle(suitable)
         shown = suitable[:10]
 
-        # 【修正版】建立一個 Embed 列表，改用 Thumbnail 避免被 Discord 合併圖片
+        # 用 Thumbnail（不是 set_image）避免被 Discord 合併圖片
         embeds = []
-        
+
         for index, m in enumerate(shown):
-            b_id = m['b']
-            s_id = m['s']
-            pp = m['p']
-            mod = m['m']
-            
-            # 即時抓歌名
-            info = fetch_beatmap_info(b_id)
-            if info:
-                name = f"{info['artist']} - {info['title']} [{info['version']}]"
-            else:
-                name = f"Beatmap {b_id}"
-                
-            # 每張圖獨立建一個 Embed
+            b_id = m.get('beatmap_id')
+            s_id = m.get('beatmapset_id')
+            pp = m.get('pp', 0)
+            name = f"{m.get('artist')} - {m.get('title')} [{m.get('version')}]"
+
             emb = discord.Embed(
-                title=f"#{index + 1} | {pp}pp | Mod: {mod}",
+                title=f"#{index + 1} | {pp:.0f}pp | Mod: NM",
                 description=f"🎵 **[{name}](https://osu.ppy.sh/b/{b_id})**",
                 color=discord.Color.from_rgb(255, 102, 170)
             )
-            
-            # 【關鍵修改】改用 set_thumbnail，讓圖片顯示在右側小框，防止被 Discord 合併
+
             if s_id:
                 emb.set_thumbnail(url=f"https://assets.ppy.sh/beatmaps/{s_id}/covers/list.jpg")
-            
-            # 在最後一張 Embed 放上 Footer 提示
+
             if index == len(shown) - 1:
-                emb.set_footer(text=f"共找到 {len(suitable)} 張，隨機顯示其中 {len(shown)} 張 | 網頁版搜尋: /maps")
-                
+                emb.set_footer(text=f"共找到 {len(suitable)} 張，隨機顯示其中 {len(shown)} 張 | 資料來源：osu-花火網頁 農圖庫")
+
             embeds.append(emb)
 
-        # 一次把這組 Embeds (最多10個) 發送出去
         await ctx.send(embeds=embeds)
         return
 
-    # --- 舊用法：隨機抽一張 ---
+    # --- 單一目標 PP：隨機抽一張 ---
     try:
         target_pp_int = int(target_pp)
     except ValueError:
         return await ctx.send("❌ 請輸入數字，例如 `!rec 400` 或 `!rec 200-300`")
 
-    level = (target_pp_int // 100) * 100
-    json_path = f"maps_{level}.json"
-
-    await ctx.send(f"🔍 正在從 `{json_path}` 農夫圖庫搜尋 {target_pp_int}pp 左右的推薦地圖...")
-
-    if not os.path.exists(json_path):
-        return await ctx.send(f"❌ 錯誤：目前還沒建立 {level}pp 級距的地圖庫檔案（找不到 `{json_path}`）。")
+    await ctx.send(f"🔍 正在從網站農圖庫搜尋 {target_pp_int}pp 左右的推薦地圖...")
 
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            raw_maps_data = json.load(f)
-
-        if not raw_maps_data:
-            return await ctx.send(f"😢 檔案 `{json_path}` 裡面目前沒有任何地圖數據。")
-
-        seen_ids = set()
-        maps_data = []
-        for m in raw_maps_data:
-            b_id = m.get('b')
-            if b_id not in seen_ids:
-                seen_ids.add(b_id)
-                maps_data.append(m)
-
-        suitable_maps = [m for m in maps_data if (target_pp_int - 10) <= m.get('p', 0) <= (target_pp_int + 10)]
+        suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 10, pp_max=target_pp_int + 10)
 
         if not suitable_maps:
-            suitable_maps = [m for m in maps_data if level <= m.get('p', 0) <= (level + 99)]
-            if not suitable_maps:
-                suitable_maps = maps_data
-                await ctx.send(f"⚠️ 提示：找不到 {target_pp_int}pp 附近的地圖，改從整本 `{json_path}` 中隨機抽選。")
-            else:
-                await ctx.send(f"⚠️ 提示：沒有剛好在 {target_pp_int}±10pp 內的地圖，改從整個 {level}pp 庫中隨機抽選。")
+            level = (target_pp_int // 100) * 100
+            suitable_maps = fetch_farm_maps(pp_min=level, pp_max=level + 99)
+            if suitable_maps:
+                await ctx.send(f"⚠️ 提示：沒有剛好在 {target_pp_int}±10pp 內的地圖，改從整個 {level}pp 範圍中隨機抽選。")
 
-        chosen_map = random.choice(suitable_maps)
-        b_id = chosen_map.get('b')
-        s_id = chosen_map.get('s')
-        mods_used = chosen_map.get('m', 'NoMod')
-        avg_pp = chosen_map.get('p', 0)
-
-        embed = discord.Embed(
-            title=f"✨ 幫你找到一張 {avg_pp}pp 左右的農夫圖囉！",
-            description=f"🎵 **[點我直接前往該地圖的 osu! 官網頁面](https://osu.ppy.sh/b/{b_id})**",
-            color=discord.Color.from_rgb(255, 102, 170)
-        )
-        embed.add_field(name="地圖 ID (Beatmap ID)", value=f"`{b_id}`", inline=True)
-        embed.add_field(name="推薦搭配 Mod", value=f"`{mods_used.upper()}`", inline=True)
-        embed.add_field(name="預估 PP ", value=f"`{avg_pp} pp`", inline=True)
-
-        if s_id:
-            banner_url = f"https://assets.ppy.sh/beatmaps/{s_id}/covers/cover.jpg?v={random.random()}"
-            embed.set_image(url=banner_url)
-            embed.set_footer(text=f"數據來源：本地 {level}pp 專屬分類庫")
-        else:
-            embed.set_footer(text=f"數據來源：本地 {level}pp 專屬分類庫 (提示：在 JSON 補上 's' 可解鎖封面大圖)")
-
-        await ctx.send(embed=embed)
-
-    except json.JSONDecodeError:
-        await ctx.send(f"❌ 讀取失敗：`{json_path}` 的 JSON 格式有錯誤，請檢查標點符號。")
+        if not suitable_maps:
+            suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 50, pp_max=target_pp_int + 50)
+            if suitable_maps:
+                await ctx.send(f"⚠️ 提示：找不到 {target_pp_int}pp 附近的地圖，改從 ±50pp 範圍中隨機抽選。")
     except Exception as e:
-        print(f"分類推薦讀取失敗: {e}")
-        await ctx.send("❌ 讀取分類地圖數據時發生未知錯誤。")
+        print(f"farm-maps-list 查詢失敗: {e}")
+        return await ctx.send("❌ 連線農圖庫網站失敗，請稍後再試。")
+
+    if not suitable_maps:
+        return await ctx.send(f"😢 網站農圖庫目前還沒有 {target_pp_int}pp 附近的地圖資料。")
+
+    chosen_map = random.choice(suitable_maps)
+    b_id = chosen_map.get('beatmap_id')
+    s_id = chosen_map.get('beatmapset_id')
+    avg_pp = chosen_map.get('pp', 0)
+    name = f"{chosen_map.get('artist')} - {chosen_map.get('title')} [{chosen_map.get('version')}]"
+
+    embed = discord.Embed(
+        title=f"✨ 幫你找到一張 {avg_pp:.0f}pp 左右的農圖囉！",
+        description=f"🎵 **[{name}](https://osu.ppy.sh/b/{b_id})**",
+        color=discord.Color.from_rgb(255, 102, 170)
+    )
+    embed.add_field(name="地圖 ID (Beatmap ID)", value=f"`{b_id}`", inline=True)
+    embed.add_field(name="推薦搭配 Mod", value="`NM`", inline=True)
+    embed.add_field(name="預估 PP", value=f"`{avg_pp:.0f} pp`", inline=True)
+
+    if s_id:
+        banner_url = f"https://assets.ppy.sh/beatmaps/{s_id}/covers/cover.jpg?v={random.random()}"
+        embed.set_image(url=banner_url)
+    embed.set_footer(text="資料來源：osu-花火網頁 農圖庫（每 10 分鐘自動更新）")
+
+    await ctx.send(embed=embed)
 
 # ====================================================
 #  補回消失的 keep_alive 區塊 (請加在 bot.run 的上方)
