@@ -1,142 +1,20 @@
 import os
 import urllib.request
 import random
-import json
-import glob as glob_mod
 import requests
 import discord
 from discord.ext import commands
 from ossapi import Ossapi, Mod
 import rosu_pp_py
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask
 from threading import Thread
 
-# ============ Flask 伺服器 ============
+# ============ Flask 伺服器（防斷線健康檢查用，內容見檔案底部 keep_alive）============
 app = Flask('')
 
 @app.route('/')
 def home():
     return "Bot is alive!"
-
-@app.route('/maps')
-def maps_page():
-    return render_template_string(MAPS_HTML)
-
-# ============ Flask API 路由 ============
-
-@app.route('/api/maps')
-def api_maps():
-    min_pp = request.args.get('min_pp', 0, type=int)
-    max_pp = request.args.get('max_pp', 9999, type=int)
-    all_maps = load_all_maps()
-    filtered = [m for m in all_maps if min_pp <= m.get('p', 0) <= max_pp]
-    filtered.sort(key=lambda m: m.get('p', 0))
-    
-    # 這裡確保把 JSON 檔案裡的 title, artist, version 完整帶給前端網頁
-    results = []
-    for m in filtered[:100]:  # 最多顯示前 100 筆
-        results.append({
-            "b": m.get("b"), 
-            "s": m.get("s", 0), 
-            "p": m.get("p", 0), 
-            "m": m.get("m", "NoMod"),
-            "title": m.get("title"),
-            "artist": m.get("artist"),
-            "version": m.get("version")
-        })
-    return jsonify(results)
-
-
-# ============ 網頁 HTML 模板 ============
-MAPS_HTML = """
-<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PP Farm 圖庫搜尋</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; padding: 20px; }
-  h1 { text-align: center; color: #ff66aa; margin-bottom: 20px; }
-  .search-box { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-  .search-box input { padding: 10px 15px; border: 2px solid #ff66aa; border-radius: 8px;
-    background: #16213e; color: #eee; font-size: 16px; width: 150px; text-align: center; }
-  .search-box button { padding: 10px 25px; border: none; border-radius: 8px;
-    background: #ff66aa; color: #fff; font-size: 16px; cursor: pointer; font-weight: bold; }
-  .search-box button:hover { background: #ff8ec4; }
-  table { width: 100%; border-collapse: collapse; max-width: 900px; margin: 0 auto; }
-  th { background: #16213e; color: #ff66aa; padding: 12px; text-align: left; border-bottom: 2px solid #ff66aa; }
-  td { padding: 10px 12px; border-bottom: 1px solid #333; vertical-align: middle; }
-  tr:hover { background: #16213e; }
-  .cover { width: 80px; height: 45px; object-fit: cover; border-radius: 4px; }
-  .song-link { color: #ff66aa; text-decoration: none; font-weight: bold; }
-  .song-link:hover { text-decoration: underline; }
-  .mod-badge { background: #ff66aa; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 13px; }
-  .pp-val { color: #ffd700; font-weight: bold; }
-  .info { text-align: center; color: #888; margin-top: 15px; }
-  .loading { text-align: center; color: #ff66aa; display: none; margin: 20px; }
-</style>
-</head>
-<body>
-<h1>PP Farm 圖庫搜尋</h1>
-<div class="search-box">
-  <input type="number" id="minPP" placeholder="最小 PP" value="200">
-  <input type="number" id="maxPP" placeholder="最大 PP" value="300">
-  <button onclick="searchMaps()">搜尋</button>
-</div>
-<div class="loading" id="loading">搜尋中...</div>
-<div class="info" id="info"></div>
-<table>
-  <thead>
-    <tr><th>封面</th><th>地圖連結 (歌名)</th><th>PP</th><th>Mod</th></tr>
-  </thead>
-  <tbody id="results"></tbody>
-</table>
-
-<script>
-function searchMaps() {
-  const min = document.getElementById('minPP').value || 0;
-  const max = document.getElementById('maxPP').value || 9999;
-  const tbody = document.getElementById('results');
-  const loading = document.getElementById('loading');
-  const info = document.getElementById('info');
-  tbody.innerHTML = '';
-  info.textContent = '';
-  loading.style.display = 'block';
-  
-  fetch(`/api/maps?min_pp=${min}&max_pp=${max}`)
-    .then(r => r.json())
-    .then(data => {
-      loading.style.display = 'none';
-      info.textContent = `找到 ${data.length} 張地圖 (最多顯示前 100 筆)`;
-      
-      data.forEach(m => {
-        const coverUrl = m.s ? `https://assets.ppy.sh/beatmaps/${m.s}/covers/cover.jpg` : '';
-        const href = `https://osu.ppy.sh/b/${m.b}`;
-        
-        // 核心邏輯：如果 JSON 檔裡有完整的 title 就拿來做為超連結文字！
-        let displayName = `前往地圖頁面 (ID: ${m.b})`;
-        if (m.title) {
-          const artist = m.artist ? `${m.artist} - ` : '';
-          const version = m.version ? ` [${m.version}]` : '';
-          displayName = `${artist}${m.title}${version}`;
-        }
-        
-        tbody.innerHTML += `<tr>
-          <td>${coverUrl ? `<img class="cover" src="${coverUrl}" onerror="this.style.display='none'">` : '無封面'}</td>
-          <td><a class="song-link" href="${href}" target="_blank">${displayName}</a></td>
-          <td class="pp-val">${m.p} pp</td>
-          <td><span class="mod-badge">${m.m}</span></td>
-        </tr>`;
-      });
-    });
-}
-searchMaps();
-</script>
-</body>
-</html>
-"""
 
 # ============ 環境變數 ============
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -158,18 +36,6 @@ if not os.path.exists("maps"):
     os.makedirs("maps")
 
 # ============ 工具函式 ============
-def load_all_maps():
-    all_maps = []
-    seen = set()
-    for path in sorted(glob_mod.glob("maps_*.json")):
-        with open(path, "r", encoding="utf-8") as f:
-            for m in json.load(f):
-                b = m.get("b")
-                if b not in seen:
-                    seen.add(b)
-                    all_maps.append(m)
-    return all_maps
-
 # osu-花火網頁 的農圖庫 API：由該網站的 farm-crawl-cron 每 10 分鐘自動爬蟲更新，
 # 資料本身已經內含 title/artist/version，!rec 不用再自己額外查一次 beatmap 資訊
 FARM_MAPS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/farm-maps-list"
@@ -194,7 +60,7 @@ async def on_ready():
 # 指令用法錯誤（缺參數/參數型別錯）預設只會印到 log、使用者完全看不到任何回覆，
 # 補上一個全域錯誤處理，讓打錯指令的人至少會收到用法提示
 COMMAND_USAGE = {
-    'acc': "用法：`!acc [beatmap_id] [accuracy] [mods]`，例如 `!acc 1234567 98.5 HD`",
+    'acc': "用法：`!acc [beatmap_id] [accuracy] [Mod] [combo] [miss數]`，例如 `!acc 1234567 98.5 HD` 或 `!acc 1234567 98.5 HDDT 520 2`（Mod/combo/miss 皆可省略）",
     'rec': "用法：`!rec [目標PP] [Mod]` 或 `!rec [最小PP-最大PP] [Mod]`，例如 `!rec 400`、`!rec 400 DT`、`!rec 200-300 HR`（Mod 可省略，預設 NM，支援 NM/DT/HD/HDDT/HR/HDHR）",
 }
 
@@ -214,7 +80,13 @@ async def ping(ctx):
 
 # --- 1. 預估 PP 查詢指令 (!acc) ---
 @bot.command()
-async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = ""):
+async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = "", combo: int = None, misses: int = None):
+    """
+    用法:
+      !acc [beatmap_id] [accuracy] [Mod] [combo] [miss數]
+      例如 !acc 1234567 98.5 HD、!acc 1234567 98.5 HDDT 520 2
+      combo/miss 可省略（預設當作 Full Combo、0 miss 計算），有帶的話算出來的 PP 會更貼近實際那一次的遊玩
+    """
     await ctx.send("⏳ 正在計算中，請稍候...")
     map_path = f"maps/{beatmap_id}.osu"
     if not os.path.exists(map_path):
@@ -237,18 +109,38 @@ async def acc(ctx, beatmap_id: int, accuracy: float, mods_str: str = ""):
                     return await ctx.send(f"❌ 找不到 Mod: `{m}`")
 
         parsed_map = rosu_pp_py.Beatmap(path=map_path)
-        calculator = rosu_pp_py.Performance(accuracy=accuracy, mods=mods_value)
-        result = calculator.calculate(parsed_map)
+        diff_attrs = rosu_pp_py.Difficulty(mods=mods_value).calculate(parsed_map)
+
+        perf_kwargs = {"accuracy": accuracy, "mods": mods_value}
+        clamped_combo = None
+        if combo is not None:
+            clamped_combo = min(combo, diff_attrs.max_combo)
+            perf_kwargs["combo"] = clamped_combo
+        if misses is not None:
+            perf_kwargs["misses"] = misses
+
+        result = rosu_pp_py.Performance(**perf_kwargs).calculate(diff_attrs)
+
+        star = diff_attrs.stars
+        beatmapset = beatmap.beatmapset()
+        mods_display = mods_str.upper() if mods_str else "NM"
 
         embed = discord.Embed(
-            title=f"{beatmap.beatmapset().artist} - {beatmap.beatmapset().title}",
+            title=f"{beatmapset.artist} - {beatmapset.title}",
             url=f"https://osu.ppy.sh/b/{beatmap_id}",
-            color=discord.Color.from_rgb(255, 102, 170)
+            description=f"[{beatmap.version}] mapped by {beatmapset.creator}",
+            color=star_color(star)
         )
-        embed.add_field(name="難度名稱", value=beatmap.version, inline=False)
-        embed.add_field(name="指定 Mod", value=mods_str.upper() if mods_str else "No Mod", inline=True)
-        embed.add_field(name="指定 Accuracy", value=f"{accuracy}%", inline=True)
-        embed.add_field(name="預估 PP", value=f"**{result.pp:.2f} pp**", inline=False)
+        embed.add_field(name="⭐ 星數", value=f"{star:.2f}★", inline=True)
+        embed.add_field(name="🎯 預估 PP", value=f"{result.pp:.2f}pp", inline=True)
+        embed.add_field(name="🎮 Mod", value=f"`{mods_display}`", inline=True)
+        embed.add_field(name="🥁 BPM", value=f"{beatmap.bpm or 0:.0f}", inline=True)
+        embed.add_field(name="⏱️ 長度", value=format_length(beatmap.total_length), inline=True)
+        embed.add_field(name="📐 Accuracy", value=f"{accuracy}%", inline=True)
+        if clamped_combo is not None:
+            embed.add_field(name="🔗 Combo", value=f"{clamped_combo}x / {diff_attrs.max_combo}x", inline=True)
+        if misses is not None:
+            embed.add_field(name="❌ Miss", value=f"{misses}", inline=True)
         embed.set_footer(text="HANABI PP 計算系統")
 
         try:
