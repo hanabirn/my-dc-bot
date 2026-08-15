@@ -30,6 +30,7 @@ BOTS = [
         "env_map": {
             "TOKEN": "MIKU_TOKEN",
             "OSU_API_KEY": "MIKU_OSU_API_KEY",
+            "TARGET_BOT_ID": "MIKU_TARGET_BOT_ID",
         },
     },
     {

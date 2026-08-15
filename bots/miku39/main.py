@@ -16,6 +16,14 @@ from osu_interactions import handle_play_interactions
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
+# 只監聽這個 Discord user ID 發的訊息（那支真正在貼戰績的 bot），避免把任何 bot
+# 的訊息都當成戰績分析——之前用「message.author.bot」判斷太寬，連 osu_bot 自己
+# 的 !help 選單（文字裡剛好有 "recent"、"pp"）都會被誤判成戰績訊息。
+_target_bot_id_raw = os.getenv("TARGET_BOT_ID")
+TARGET_BOT_ID = int(_target_bot_id_raw) if _target_bot_id_raw else None
+if TARGET_BOT_ID is None:
+    print("⚠️ 未設定 TARGET_BOT_ID，osu! 戰績訊息偵測功能已停用")
+
 # === 新增：建立一個簡單的 Flask 伺服器，讓 Render 能夠進行健康檢查 ===
 app = Flask(__name__)
 
@@ -46,20 +54,18 @@ async def handle_osu_message(message: discord.Message):
         content_text = message.content or ""
         embed_title = message.embeds[0].title or "" if message.embeds else ""
         embed_desc = message.embeds[0].description or "" if message.embeds else ""
-        
+
         embed_fields_text = ""
         if message.embeds and message.embeds[0].fields:
             embed_fields_text = " ".join([f"{f.name} {f.value}" for f in message.embeds[0].fields])
 
         all_text = f"{content_text} {embed_title} {embed_desc} {embed_fields_text}"
-        lower_text = all_text.lower()
-
-        is_osu_play = any(k in lower_text for k in ['recent', 'pp', 'play', 'miss']) or '[' in all_text
-
-        if is_osu_play:
-            await handle_play_interactions(message, all_text)
+        # 已經在 on_message 篩過發訊息的是不是目標 bot 了，這裡不用再靠關鍵字
+        # 猜測是不是戰績訊息——直接交給 handle_play_interactions 找命中分佈括號，
+        # 找不到就直接沒反應，不會誤判。
+        await handle_play_interactions(message, all_text)
     except Exception as e:
-        print(f"分析 owo 訊息時發生錯誤: {e}")
+        print(f"分析 osu! 訊息時發生錯誤: {e}")
 
 @bot.event
 async def setup_hook():
@@ -73,7 +79,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
+    if TARGET_BOT_ID is not None and message.author.id == TARGET_BOT_ID:
         await handle_osu_message(message)
         return
 
