@@ -1,4 +1,5 @@
 import os
+import requests
 import discord
 from discord.ext import commands
 from firebase_admin import db
@@ -14,6 +15,20 @@ if not OSU_CLIENT_ID or not OSU_CLIENT_SECRET:
 
 # osu! API v2（client credentials，跟 pp_checker 共用同一組 OAuth App 也沒問題）
 osu_api = Ossapi(int(OSU_CLIENT_ID), OSU_CLIENT_SECRET)
+
+# osu-花火網頁的圖庫收藏清單（公開、免驗證），用來查詢綁定成員在網站上發布的收藏摘要
+COLLECTIONS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/collections-list"
+
+def fetch_collection_summary(osu_username):
+    """依 osu! 使用者名稱查詢該玩家在網站上發布的收藏摘要，查不到回傳 None"""
+    resp = requests.get(COLLECTIONS_API, params={"q": osu_username, "page": 0}, timeout=10)
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    lname = osu_username.lower()
+    for item in items:
+        if (item.get("username") or "").lower() == lname:
+            return item
+    return None
 
 # 🎯 mode_id -> (v2 API 的 ruleset 名稱, 顯示用文字)
 OSU_MODES = {
@@ -539,7 +554,49 @@ class OsuCommands(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    # 5. 指令 !help（指令選單）
+    # 5. 指令 !collections（查詢在 osu-花火網頁 發布的圖庫收藏，可選：查別人）
+    @commands.command(name="collections", aliases=["col"])
+    async def collections_cmd(self, ctx, target: discord.Member = None):
+        lookup_member = target or ctx.author
+        ref = db.reference(f'users/{lookup_member.id}')
+        user_data = ref.get()
+
+        if not user_data:
+            await ctx.send(self._no_link_message(ctx, target))
+            return
+
+        osu_name = user_data.get('osu_name')
+
+        try:
+            entry = fetch_collection_summary(osu_name)
+        except Exception as e:
+            print(f"collections-list 查詢失敗: {e}")
+            await ctx.send("❌ 連線 osu-花火網頁 失敗，請稍後再試。")
+            return
+
+        if not entry:
+            await ctx.send(f"💨 **{osu_name}** 目前還沒有在 osu-花火網頁 上發布圖庫收藏喔！")
+            return
+
+        tags = entry.get("tags") or []
+        tags_text = "、".join(tags[:8]) + ("...等" if len(tags) > 8 else "") if tags else "（無標籤）"
+        updated_at = (entry.get("updatedAt") or "")[:10]
+
+        embed = discord.Embed(
+            title=f"📚 {entry.get('username')} 的圖庫收藏",
+            url="https://osu-collection-hanabi.netlify.app/",
+            description=f"在網站的「收藏廣場」搜尋 **{entry.get('username')}** 就能看到完整收藏內容",
+            color=discord.Color.from_rgb(255, 102, 170)
+        )
+        embed.add_field(name="收藏套數", value=f"{entry.get('totalSets', 0):,}", inline=True)
+        embed.add_field(name="最高星數", value=f"{entry.get('maxRating', 0):.2f} ⭐", inline=True)
+        embed.add_field(name="❤️ 讚數", value=f"{entry.get('likeCount', 0)}", inline=True)
+        embed.add_field(name="曲風標籤", value=tags_text, inline=False)
+        embed.set_footer(text=f"最後更新：{updated_at}｜資料來源：osu-花火網頁")
+
+        await ctx.send(embed=embed)
+
+    # 6. 指令 !help（指令選單）
     @commands.command(name="help", aliases=["menu", "指令"])
     async def help_command(self, ctx):
         embed = discord.Embed(
@@ -552,6 +609,7 @@ class OsuCommands(commands.Cog):
         embed.add_field(name="`!profile [@成員]`（別名 `!pf`）", value="四模式玩家數據總覽（PP、排名、精準度、命中分佈），一樣可以查別人", inline=False)
         embed.add_field(name="`!compare @成員`（別名 `!c`）", value="跟指定成員比較四模式 PP", inline=False)
         embed.add_field(name="`!leaderboard`（別名 `!lb`）", value="伺服器四模式綜合 PP 排行榜 Top 10", inline=False)
+        embed.add_field(name="`!collections [@成員]`（別名 `!col`）", value="查詢在 osu-花火網頁 上發布的圖庫收藏摘要，一樣可以查別人", inline=False)
         embed.set_footer(text="🎀 想再看一次這份選單，隨時輸入 !help")
         await ctx.send(embed=embed)
 
