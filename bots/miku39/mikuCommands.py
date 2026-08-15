@@ -3,6 +3,7 @@ import discord
 import random
 import json
 import os
+import requests
 from googleSearch import BEAUTY_IMAGES
 
 import firebase_admin
@@ -10,6 +11,36 @@ from firebase_admin import credentials, db
 from ossapi import Ossapi
 
 DATA_FILE = "userPools.json"
+
+# --- 自動拓圖（選用功能）：bot 抽卡 除了原本手動精選的 BEAUTY_IMAGES，也會有機率
+# 即時從 Safebooru（純 SFW 的動漫圖庫鏡像，rating 一定過濾為 safe）隨機抓一張新圖，
+# 不限定特定角色/作品，圖庫非常龐大不容易抽到重複的。抓取失敗（逾時/斷線/API 改版）
+# 就直接回傳 None，呼叫端會自動退回使用 BEAUTY_IMAGES，不影響 bot 抽卡 的核心功能。
+SAFEBOORU_API = "https://safebooru.org/index.php"
+SAFEBOORU_TAGS = "1girl solo"
+SAFEBOORU_PID_RANGE = 3000  # 實測這個 tag 組合在 pid=8000 仍有結果，這裡保守取值避免抽到空頁
+
+def fetch_random_anime_image():
+    """從 Safebooru 隨機抓一張 SFW 動漫圖的網址，失敗回傳 None"""
+    try:
+        pid = random.randint(0, SAFEBOORU_PID_RANGE)
+        resp = requests.get(SAFEBOORU_API, params={
+            "page": "dapi", "s": "post", "q": "index", "json": "1",
+            "tags": SAFEBOORU_TAGS, "pid": pid, "limit": 1,
+        }, timeout=8, headers={"User-Agent": "Miku39-DiscordBot/1.0"})
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            return None
+        post = data[0]
+        # Safebooru 混用新舊兩套 rating 命名："general"（新的 4 級制，等同全年齡）
+        # 跟 "safe"（舊的 3 級制），兩者都算安全，混合式命名是它自己 API 的行為
+        if post.get("rating") not in ("general", "safe"):
+            return None
+        return post.get("file_url") or post.get("sample_url")
+    except Exception as e:
+        print(f"[MIKU39] Safebooru 抓圖失敗（將改用精選圖庫）: {e}")
+        return None
 
 # --- osu! 戰績串接（選用功能）：讀取 Osu Bot 寫進同一個 Firebase 的帳號綁定／排名
 # 資料（見 osu_bot/cogs/osu_commands.py 的 !link、!profile 排名追蹤），讓「bot 運勢」
@@ -180,7 +211,11 @@ async def handle_miku_commands(message: discord.Message, bot):
 
     # 2. 抽卡指令
     elif msg_str == "bot 抽卡":
-        img_url = random.choice(BEAUTY_IMAGES)
+        # 一半機率嘗試即時從網路抓一張新圖，抓不到（逾時/斷線）就退回精選圖庫，
+        # 確保 bot 抽卡 永遠不會因為外部 API 問題而完全失敗
+        img_url = fetch_random_anime_image() if random.random() < 0.5 else None
+        if not img_url:
+            img_url = random.choice(BEAUTY_IMAGES)
         embed = discord.Embed(
             title="🎤 世界第一公主殿下 美圖抽卡 ♪",
             description="點擊按鈕或輸入指令可以收藏到珍藏庫喔！",
@@ -229,7 +264,7 @@ async def handle_miku_commands(message: discord.Message, bot):
             color=discord.Color.from_str("#39C5BB")
         )
         embed.add_field(name="`bot 運勢`", value="抽一次今日運勢籤詩（如果你已經在 Osu Bot 用過 `!link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
-        embed.add_field(name="`bot 抽卡`", value="隨機抽一張世界第一公主殿下的美圖，可以收藏到珍藏庫", inline=False)
+        embed.add_field(name="`bot 抽卡`", value="隨機抽一張美圖（精選圖庫 + 一定機率即時從網路抓新圖），可以收藏到珍藏庫", inline=False)
         embed.add_field(name="`bot 珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
         embed.set_footer(text="💚 想再看一次這份選單，隨時輸入 bot 選單")
         await message.reply(embed=embed)
