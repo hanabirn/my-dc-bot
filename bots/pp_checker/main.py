@@ -174,12 +174,14 @@ def load_all_maps():
 # 資料本身已經內含 title/artist/version，!rec 不用再自己額外查一次 beatmap 資訊
 FARM_MAPS_API = "https://osu-collection-hanabi.netlify.app/.netlify/functions/farm-maps-list"
 
-def fetch_farm_maps(pp_min=None, pp_max=None, mods="NM", mode="osu"):
+def fetch_farm_maps(pp_min=None, pp_max=None, mods="NM", mode="osu", farm_only=False):
     params = {"mode": mode, "mods": mods, "page": 0}
     if pp_min is not None:
         params["ppMin"] = pp_min
     if pp_max is not None:
         params["ppMax"] = pp_max
+    if farm_only:
+        params["farmOnly"] = "1"
     resp = requests.get(FARM_MAPS_API, params=params, timeout=10)
     resp.raise_for_status()
     return resp.json().get("items", [])
@@ -306,10 +308,14 @@ async def rec(ctx, target_pp: str, mods: str = "NM"):
         except ValueError:
             return await ctx.send("❌ 格式錯誤，請用 `!rec 最小PP-最大PP`，例如 `!rec 200-300`")
 
-        await ctx.send(f"🔍 正在從網站農圖庫搜尋 {min_pp}~{max_pp}pp（{mods}）的地圖...")
+        await ctx.send(f"🔍 正在從網站農圖庫搜尋 {min_pp}~{max_pp}pp（{mods}）的農圖...")
 
         try:
-            suitable = fetch_farm_maps(pp_min=min_pp, pp_max=max_pp, mods=mods)
+            suitable = fetch_farm_maps(pp_min=min_pp, pp_max=max_pp, mods=mods, farm_only=True)
+            if not suitable:
+                suitable = fetch_farm_maps(pp_min=min_pp, pp_max=max_pp, mods=mods)
+                if suitable:
+                    await ctx.send("⚠️ 提示：這個範圍內符合農圖標準的圖還沒被爬蟲分類完（資料庫持續擴充中），先顯示範圍內的所有圖。")
         except Exception as e:
             print(f"farm-maps-list 查詢失敗: {e}")
             return await ctx.send("❌ 連線農圖庫網站失敗，請稍後再試。")
@@ -359,21 +365,27 @@ async def rec(ctx, target_pp: str, mods: str = "NM"):
     except ValueError:
         return await ctx.send("❌ 請輸入數字，例如 `!rec 400` 或 `!rec 200-300`")
 
-    await ctx.send(f"🔍 正在從網站農圖庫搜尋 {target_pp_int}pp（{mods}）左右的推薦地圖...")
+    await ctx.send(f"🔍 正在從網站農圖庫搜尋 {target_pp_int}pp（{mods}）左右的農圖...")
 
     try:
-        suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 10, pp_max=target_pp_int + 10, mods=mods)
+        suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 10, pp_max=target_pp_int + 10, mods=mods, farm_only=True)
 
         if not suitable_maps:
             level = (target_pp_int // 100) * 100
-            suitable_maps = fetch_farm_maps(pp_min=level, pp_max=level + 99, mods=mods)
+            suitable_maps = fetch_farm_maps(pp_min=level, pp_max=level + 99, mods=mods, farm_only=True)
             if suitable_maps:
-                await ctx.send(f"⚠️ 提示：沒有剛好在 {target_pp_int}±10pp 內的地圖，改從整個 {level}pp 範圍中隨機抽選。")
+                await ctx.send(f"⚠️ 提示：沒有剛好在 {target_pp_int}±10pp 內的農圖，改從整個 {level}pp 範圍中隨機抽選。")
 
         if not suitable_maps:
-            suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 50, pp_max=target_pp_int + 50, mods=mods)
+            suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 50, pp_max=target_pp_int + 50, mods=mods, farm_only=True)
             if suitable_maps:
-                await ctx.send(f"⚠️ 提示：找不到 {target_pp_int}pp 附近的地圖，改從 ±50pp 範圍中隨機抽選。")
+                await ctx.send(f"⚠️ 提示：找不到 {target_pp_int}pp 附近的農圖，改從 ±50pp 範圍中隨機抽選。")
+
+        # 農圖分類還在backfill中：整條 farm_only 鏈都落空時，退回不限定農圖標準的原始查詢
+        if not suitable_maps:
+            suitable_maps = fetch_farm_maps(pp_min=target_pp_int - 10, pp_max=target_pp_int + 10, mods=mods)
+            if suitable_maps:
+                await ctx.send("⚠️ 提示：這個 PP 範圍符合農圖標準的圖還沒被爬蟲分類完（資料庫持續擴充中），先顯示範圍內的所有圖。")
     except Exception as e:
         print(f"farm-maps-list 查詢失敗: {e}")
         return await ctx.send("❌ 連線農圖庫網站失敗，請稍後再試。")
