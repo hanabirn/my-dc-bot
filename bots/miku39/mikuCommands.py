@@ -265,6 +265,14 @@ def save_user_collection(user_id, images):
     except Exception as e:
         print(f"[MIKU39] 更新珍藏庫失敗: {e}")
 
+def _collection_progress(user_cards):
+    """圖鑑收集度：只算「精選圖庫」(R+SR，BEAUTY_IMAGES + custom_images) 這個
+    固定名單，N 那種即時從網路抓的隨機圖沒有邊界、不算進總數裡，不然永遠湊
+    不齊。回傳 (已收集數, 精選圖庫總數)。"""
+    curated_pool = set(BEAUTY_IMAGES) | set(get_custom_images())
+    collected = len(set(user_cards) & curated_pool)
+    return collected, len(curated_pool)
+
 def _migrate_local_collections_to_firebase():
     """一次性搬遷：如果容器裡還留著舊版的 userPools.json，且 Firebase 那邊的
     珍藏庫路徑目前是空的，就把本機資料搬過去，避免這次改版直接把使用者手上
@@ -366,6 +374,12 @@ class PoolView(discord.ui.View):
             color=discord.Color.from_str("#39C5BB")
         )
         embed.set_image(url=self.card_list[self.current_index])
+        collected, total = _collection_progress(self.card_list)
+        if total > 0:
+            if collected >= total:
+                embed.set_footer(text=f"🏆 圖鑑收集度：{collected}/{total}（全收集達成！）")
+            else:
+                embed.set_footer(text=f"📖 圖鑑收集度：{collected}/{total}")
         return embed
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
