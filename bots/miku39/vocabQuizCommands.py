@@ -149,20 +149,52 @@ def _build_options(word_entry, pool):
     return options
 
 
+# 記錄每個使用者「目前正在進行的測驗」進度：author_id -> session dict。
+# 一次只能有一場測驗在跑（避免同一人在多個頻道各開一場，狀態互相打架）；
+# session 是同一份 dict 物件在整場測驗的所有 View 之間傳來傳去，被
+# /停止單字測驗 或按鈕點掉之後就從這裡移除，View 靠「這個 session 是否還
+# 掛在這裡」來判斷自己是不是已經是一場「已經結束的舊測驗」的殘留畫面。
+_ACTIVE_SESSIONS = {}
+
+
+def _session_summary(session, title):
+    return discord.Embed(
+        title=title,
+        description=f"共作答 {session['done']}/{session['total']} 題，答對 **{session['correct']}** 題。",
+        color=discord.Color.from_str("#39C5BB"),
+    )
+
+
+def _make_question_embed(session):
+    word_entry = session["word_entry"]
+    embed = discord.Embed(
+        title=f"📖 JLPT {session['level']} 漢字讀音測驗　第 {session['done'] + 1}/{session['total']} 題",
+        description=f"# {word_entry['word']}\n\n這個漢字怎麼唸？",
+        color=discord.Color.from_str("#39C5BB"),
+    )
+    embed.set_footer(text="30 秒內點選按鈕作答")
+    return embed
+
+
 class VocabQuizView(discord.ui.View):
-    def __init__(self, author_id, level, word_entry, options):
+    def __init__(self, author_id, session, pool):
         super().__init__(timeout=30.0)
         self.author_id = author_id
-        self.level = level
-        self.word_entry = word_entry
+        self.session = session
+        self.pool = pool
         self.answered = False
         self.message = None
 
-        for opt in options:
-            self.add_item(self._make_button(opt))
+        for opt in session["options"]:
+            self.add_item(self._make_answer_button(opt))
+        self.add_item(self._make_stop_button())
 
-    def _make_button(self, option_text):
-        is_correct = option_text == self.word_entry["kana"]
+    def _is_stale(self):
+        return _ACTIVE_SESSIONS.get(self.author_id) is not self.session
+
+    def _make_answer_button(self, option_text):
+        word_entry = self.session["word_entry"]
+        is_correct = option_text == word_entry["kana"]
         btn = discord.ui.Button(label=option_text, style=discord.ButtonStyle.secondary)
 
         async def callback(interaction: discord.Interaction):
@@ -170,43 +202,79 @@ class VocabQuizView(discord.ui.View):
                 await interaction.response.send_message("❌ 這不是你的題目，不能幫忙作答唷！", ephemeral=True)
                 return
             if self.answered:
-                await interaction.response.send_message("這題已經作答過囉！", ephemeral=True)
+                return
+            if self._is_stale():
+                await interaction.response.send_message("這場測驗已經結束囉，打 /日文單字測驗 開新的一場吧！", ephemeral=True)
                 return
             self.answered = True
 
             for child in self.children:
                 child.disabled = True
-                if child.label == self.word_entry["kana"]:
+                if isinstance(child, discord.ui.Button) and child.label == word_entry["kana"]:
                     child.style = discord.ButtonStyle.success
                 elif child is btn and not is_correct:
                     child.style = discord.ButtonStyle.danger
+
+            self.session["done"] += 1
+            if is_correct:
+                self.session["correct"] += 1
 
             result_text = "✅ 答對了！" if is_correct else "❌ 答錯了～"
             embed = interaction.message.embeds[0]
             embed.color = discord.Color.green() if is_correct else discord.Color.red()
             embed.add_field(
                 name=result_text,
-                value=f"正確讀音：**{self.word_entry['kana']}**\n意思：{self.word_entry['meaning']}",
+                value=f"正確讀音：**{word_entry['kana']}**\n意思：{word_entry['meaning']}",
                 inline=False,
             )
             self.stop()
-            await interaction.response.edit_message(embed=embed, view=self)
+
+            if self.session["done"] >= self.session["total"]:
+                _ACTIVE_SESSIONS.pop(self.author_id, None)
+                await interaction.response.edit_message(embed=embed, view=None)
+                await interaction.followup.send(embed=_session_summary(self.session, "🏁 測驗結束！"))
+            else:
+                next_view = NextQuestionView(self.author_id, self.session, self.pool)
+                await interaction.response.edit_message(embed=embed, view=next_view)
+                next_view.message = interaction.message
+
+        btn.callback = callback
+        return btn
+
+    def _make_stop_button(self):
+        btn = discord.ui.Button(label="🛑 結束測驗", style=discord.ButtonStyle.danger, row=1)
+
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("❌ 這不是你的測驗，不能幫忙結束唷！", ephemeral=True)
+                return
+            if self.answered:
+                return
+            self.answered = True
+            _ACTIVE_SESSIONS.pop(self.author_id, None)
+            for child in self.children:
+                child.disabled = True
+            self.stop()
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send(embed=_session_summary(self.session, "🛑 測驗已結束"))
 
         btn.callback = callback
         return btn
 
     async def on_timeout(self):
-        if self.answered:
+        if self.answered or self._is_stale():
             return
+        _ACTIVE_SESSIONS.pop(self.author_id, None)
+        word_entry = self.session["word_entry"]
         for child in self.children:
             child.disabled = True
-            if child.label == self.word_entry["kana"]:
+            if isinstance(child, discord.ui.Button) and child.label == word_entry["kana"]:
                 child.style = discord.ButtonStyle.success
         if self.message:
             embed = self.message.embeds[0]
             embed.add_field(
-                name="⌛ 時間到！",
-                value=f"正確讀音：**{self.word_entry['kana']}**\n意思：{self.word_entry['meaning']}",
+                name="⌛ 時間到！測驗已自動結束",
+                value=f"正確讀音：**{word_entry['kana']}**\n意思：{word_entry['meaning']}",
                 inline=False,
             )
             try:
@@ -215,9 +283,91 @@ class VocabQuizView(discord.ui.View):
                 pass
 
 
+class NextQuestionView(discord.ui.View):
+    def __init__(self, author_id, session, pool):
+        super().__init__(timeout=30.0)
+        self.author_id = author_id
+        self.session = session
+        self.pool = pool
+        self.acted = False
+        self.message = None
+
+        self.add_item(self._make_next_button())
+        self.add_item(self._make_stop_button())
+
+    def _is_stale(self):
+        return _ACTIVE_SESSIONS.get(self.author_id) is not self.session
+
+    def _make_next_button(self):
+        btn = discord.ui.Button(label="➡️ 下一題", style=discord.ButtonStyle.primary)
+
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("❌ 這不是你的測驗唷！", ephemeral=True)
+                return
+            if self.acted:
+                return
+            if self._is_stale():
+                await interaction.response.send_message("這場測驗已經結束囉，打 /日文單字測驗 開新的一場吧！", ephemeral=True)
+                return
+            self.acted = True
+            self.stop()
+
+            word_entry = random.choice(self.pool)
+            self.session["word_entry"] = word_entry
+            self.session["options"] = _build_options(word_entry, self.pool)
+
+            quiz_view = VocabQuizView(self.author_id, self.session, self.pool)
+            await interaction.response.edit_message(embed=_make_question_embed(self.session), view=quiz_view)
+            quiz_view.message = interaction.message
+
+        btn.callback = callback
+        return btn
+
+    def _make_stop_button(self):
+        btn = discord.ui.Button(label="🛑 結束測驗", style=discord.ButtonStyle.danger)
+
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("❌ 這不是你的測驗唷！", ephemeral=True)
+                return
+            if self.acted:
+                return
+            self.acted = True
+            _ACTIVE_SESSIONS.pop(self.author_id, None)
+            for child in self.children:
+                child.disabled = True
+            self.stop()
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send(embed=_session_summary(self.session, "🛑 測驗已結束"))
+
+        btn.callback = callback
+        return btn
+
+    async def on_timeout(self):
+        if self.acted or self._is_stale():
+            return
+        _ACTIVE_SESSIONS.pop(self.author_id, None)
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 def register_vocab_commands(bot):
-    @bot.hybrid_command(name="日文單字測驗", description="JLPT 漢字讀音選擇題，預設 N5，可指定 N4~N1")
-    async def vocab_quiz_command(ctx, level: Literal["N5", "N4", "N3", "N2", "N1"] = "N5"):
+    @bot.hybrid_command(name="日文單字測驗", description="JLPT 漢字讀音選擇題，可指定等級與題數")
+    async def vocab_quiz_command(
+        ctx,
+        level: Literal["N5", "N4", "N3", "N2", "N1"] = "N5",
+        count: discord.app_commands.Range[int, 1, 20] = 5,
+    ):
+        if ctx.author.id in _ACTIVE_SESSIONS:
+            await ctx.send("你已經有一場測驗正在進行囉，先作答或打 /停止單字測驗 結束它吧！")
+            return
+
         try:
             pool = _fetch_reading_pool(level)
         except requests.RequestException:
@@ -229,15 +379,24 @@ def register_vocab_commands(bot):
             return
 
         word_entry = random.choice(pool)
-        options = _build_options(word_entry, pool)
+        session = {
+            "level": level,
+            "total": count,
+            "done": 0,
+            "correct": 0,
+            "word_entry": word_entry,
+            "options": _build_options(word_entry, pool),
+        }
+        _ACTIVE_SESSIONS[ctx.author.id] = session
 
-        embed = discord.Embed(
-            title=f"📖 JLPT {level} 漢字讀音測驗",
-            description=f"# {word_entry['word']}\n\n這個漢字怎麼唸？",
-            color=discord.Color.from_str("#39C5BB"),
-        )
-        embed.set_footer(text="30 秒內點選按鈕作答")
-
-        view = VocabQuizView(ctx.author.id, level, word_entry, options)
-        message = await ctx.send(embed=embed, view=view)
+        view = VocabQuizView(ctx.author.id, session, pool)
+        message = await ctx.send(embed=_make_question_embed(session), view=view)
         view.message = message
+
+    @bot.hybrid_command(name="停止單字測驗", description="結束你正在進行的日文單字測驗")
+    async def stop_vocab_quiz_command(ctx):
+        session = _ACTIVE_SESSIONS.pop(ctx.author.id, None)
+        if not session:
+            await ctx.send("你目前沒有進行中的單字測驗～")
+            return
+        await ctx.send(embed=_session_summary(session, "🛑 測驗已結束"))
