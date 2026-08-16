@@ -8,6 +8,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from googleSearch import BEAUTY_IMAGES
 from calendar_render import render_checkin_calendar
+from payslip_render import render_payslip
 
 import firebase_admin
 from firebase_admin import credentials, db
@@ -290,16 +291,76 @@ def _collection_progress(user_cards):
     return collected, len(curated_pool)
 
 # --- 每日打工：跟 /簽到 一樣是每天限一次的額外好感度經驗值來源，但沒有連續
-# 天數加成，單純就是「今天做過了沒」，成本最低的一種每日習慣。
+# 天數加成，單純就是「今天做過了沒」。每次打工會隨機分配到一份工作，並附上
+# 一張視覺化薪資單（跟 /簽到 的行事曆一樣走「附一張圖」的路線）；還有機率
+# 觸發特殊事件（加班費／驚喜禮物／扣薪），讓每天的結果不會一成不變。
 WORK_PATH = 'miku_gacha/work'
-WORK_EXP_MIN = 4
-WORK_EXP_MAX = 8
-WORK_MESSAGES = [
-    "去 livehouse 打工搬音響，賺到了一些好感度經驗值！🎸",
-    "幫忙錄音室調音一整天，Miku 對你刮目相看～🎧",
-    "在演唱會賣周邊商品，跟粉絲聊得很開心！🎤",
-    "幫 Miku 寫了一段新歌詞，靈感被稱讚了一番！🎶",
-    "顧攤位賣蔥造型周邊，業績嚇嚇叫！🧅",
+
+WORK_JOBS = [
+    {
+        "emoji": "🎸", "name": "演唱會場務", "label": "Stagehand",
+        "exp_range": (4, 7),
+        "messages": [
+            "去 livehouse 打工搬音響，賺到了一些好感度經驗值！🎸",
+            "幫忙架設演唱會舞台燈光，累但很有成就感！💡",
+        ],
+    },
+    {
+        "emoji": "🎧", "name": "錄音室助理", "label": "Studio Assistant",
+        "exp_range": (5, 8),
+        "messages": [
+            "幫忙錄音室調音一整天，Miku 對你刮目相看～🎧",
+            "整理錄音室的樂譜和器材，意外發現了一段沒公開過的旋律！🎼",
+        ],
+    },
+    {
+        "emoji": "🧅", "name": "周邊攤位店員", "label": "Merch Stall",
+        "exp_range": (3, 6),
+        "messages": [
+            "在演唱會賣周邊商品，跟粉絲聊得很開心！🎤",
+            "顧攤位賣蔥造型周邊，業績嚇嚇叫！🧅",
+        ],
+    },
+    {
+        "emoji": "📻", "name": "電台助理", "label": "Radio Assistant",
+        "exp_range": (4, 8),
+        "messages": [
+            "在電台幫忙選歌、接聽點歌，跟聽眾們相談甚歡！📻",
+            "幫電台節目寫了一段開場稿，主持人稱讚超順口！🎙️",
+        ],
+    },
+    {
+        "emoji": "✍️", "name": "作詞企劃", "label": "Lyricist",
+        "exp_range": (5, 9),
+        "messages": [
+            "幫 Miku 寫了一段新歌詞，靈感被稱讚了一番！🎶",
+            "跟企劃團隊一起腦力激盪新曲主題，討論到欲罷不能！💭",
+        ],
+    },
+]
+
+# 特殊事件：每次打工有 WORK_EVENT_CHANCE 的機率額外觸發一個，觸發後再依權重
+# 抽出是哪一種。bonus_image 如果精選圖庫剛好被抽爆、連即時抓圖也失敗，就當
+# 這次事件沒發生（不影響打工本身能不能領到底薪）。
+WORK_EVENT_CHANCE = 0.3
+WORK_EVENTS = [
+    {
+        "type": "bonus_exp", "weight": 45,
+        "label_zh": "🎉 加班費", "label_en": "Overtime Bonus",
+        "exp_range": (3, 8),
+        "flavor": "工作表現太亮眼，臨時被加碼了一筆獎金！",
+    },
+    {
+        "type": "bonus_image", "weight": 25,
+        "label_zh": "🎁 意外驚喜", "label_en": "Surprise Gift",
+        "flavor": "打工途中意外收到一份神秘禮物！",
+    },
+    {
+        "type": "penalty", "weight": 30,
+        "label_zh": "😴 手忙腳亂", "label_en": "Rough Shift",
+        "exp_range": (2, 5),
+        "flavor": "今天狀況有點多，不小心被扣了一點薪水...",
+    },
 ]
 
 def _get_last_work_date(user_id):
@@ -619,7 +680,7 @@ def register_commands(bot):
         embed.set_image(url=url)
         await ctx.send(embed=embed)
 
-    @bot.hybrid_command(name="打工", description="每日打工賺一點好感度經驗值")
+    @bot.hybrid_command(name="打工", description="每日打工賺好感度經驗值，附上一張薪資單，運氣好還會遇到特殊事件")
     async def work_command(ctx):
         uid = str(ctx.author.id)
         today = _today_str()
@@ -627,16 +688,66 @@ def register_commands(bot):
             await ctx.send("💤 今天已經打工過囉，明天再來吧！")
             return
 
-        exp_gained = random.randint(WORK_EXP_MIN, WORK_EXP_MAX)
-        _save_work_date(uid, today)
-        _add_exp(uid, exp_gained)
+        job = random.choice(WORK_JOBS)
+        base_exp = random.randint(*job['exp_range'])
 
-        embed = discord.Embed(
-            title="💼 打工完成！",
-            description=f"{random.choice(WORK_MESSAGES)}\n獲得 **{exp_gained}** 點好感度經驗值",
-            color=discord.Color.from_str("#39C5BB")
-        )
-        await ctx.send(embed=embed)
+        event = None
+        if random.random() < WORK_EVENT_CHANCE:
+            event = random.choices(WORK_EVENTS, weights=[e['weight'] for e in WORK_EVENTS], k=1)[0]
+
+        # 只有真的成功套用效果的事件才算數，applied_event 保持 None 就是「這次
+        # 事件沒發生」（例如 bonus_image 剛好無圖可送），不會誤顯示事件文字。
+        applied_event = None
+        bonus_delta = 0
+        bonus_image_url = None
+        image_saved_to_collection = False
+
+        if event and event['type'] == 'bonus_exp':
+            bonus_delta = random.randint(*event['exp_range'])
+            applied_event = event
+        elif event and event['type'] == 'penalty':
+            bonus_delta = -random.randint(*event['exp_range'])
+            applied_event = event
+        elif event and event['type'] == 'bonus_image':
+            collection = get_user_collection(uid)
+            curated_pool = [u for u in (BEAUTY_IMAGES + get_custom_images()) if u not in collection]
+            if curated_pool:
+                bonus_image_url = random.choice(curated_pool)
+                collection.append(bonus_image_url)
+                save_user_collection(uid, collection)
+                image_saved_to_collection = True
+                applied_event = event
+            else:
+                fallback_url = fetch_random_anime_image()
+                if fallback_url:
+                    bonus_image_url = fallback_url
+                    applied_event = event
+
+        # 扣薪事件只會壓低今天賺到的量，不會讓總經驗值倒扣（不然會覺得白打工一場，
+        # 娛樂向的 bot 沒必要做到這麼寫實）
+        total_exp = max(0, base_exp + bonus_delta)
+        _save_work_date(uid, today)
+        _add_exp(uid, total_exp)
+
+        description = f"{job['emoji']} **{job['name']}**\n{random.choice(job['messages'])}"
+        if applied_event:
+            description += f"\n\n{applied_event['label_zh']}：{applied_event['flavor']}"
+
+        embed = discord.Embed(title="💼 打工完成！", description=description, color=discord.Color.from_str("#39C5BB"))
+
+        bonus_label_en = applied_event['label_en'] if applied_event and applied_event['type'] in ('bonus_exp', 'penalty') else None
+        payslip_buf = render_payslip(job['label'], today, base_exp, bonus_label_en, bonus_delta, total_exp)
+        payslip_file = discord.File(payslip_buf, filename="payslip.png")
+        embed.set_image(url="attachment://payslip.png")
+
+        embeds = [embed]
+        if bonus_image_url:
+            gift_title = "🎁 驚喜禮物到手！已放進珍藏庫" if image_saved_to_collection else "🎁 驚喜禮物到手！"
+            gift_embed = discord.Embed(title=gift_title, color=discord.Color.from_str("#C084FC"))
+            gift_embed.set_image(url=bonus_image_url)
+            embeds.append(gift_embed)
+
+        await ctx.send(embeds=embeds, file=payslip_file)
 
     @bot.hybrid_command(name="加圖", description="（僅限主人）新增一張圖片網址到精選圖庫")
     @app_commands.describe(url="圖片網址（需以 http:// 或 https:// 開頭）")
@@ -769,7 +880,7 @@ def register_commands(bot):
         embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
         embed.add_field(name="`/贈送 @對象 [網址]`", value="把珍藏庫裡的一張圖送給其他人", inline=False)
         embed.add_field(name="`/簽到`", value="每日簽到，連續簽到經驗值獎勵會越來越多，中斷一天就重新從第 1 天算起", inline=False)
-        embed.add_field(name="`/打工`", value="每日打工賺一點好感度經驗值", inline=False)
+        embed.add_field(name="`/打工`", value="每日打工賺好感度經驗值，隨機分配工作並附上薪資單，機率觸發加班費／驚喜禮物／扣薪等特殊事件", inline=False)
         embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡`、`/簽到`、`/打工` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
         owner_id = os.getenv("MIKU_OWNER_ID")
         if owner_id and str(ctx.author.id) == owner_id:
