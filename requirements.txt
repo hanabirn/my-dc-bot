@@ -43,6 +43,7 @@ multidict==6.7.1
 oauthlib==3.3.1
 osrparse==6.0.2
 ossapi
+Pillow==12.3.0
 propcache==0.5.2
 proto-plus==1.28.0
 protobuf==7.35.1

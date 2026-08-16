@@ -7,6 +7,7 @@ import os
 import requests
 from datetime import datetime, timedelta, timezone
 from googleSearch import BEAUTY_IMAGES
+from calendar_render import render_checkin_calendar
 
 import firebase_admin
 from firebase_admin import credentials, db
@@ -146,9 +147,24 @@ def _save_checkin(user_id, date_str, streak):
     if not firebase_admin._apps:
         return
     try:
-        db.reference(f'{CHECKIN_PATH}/{user_id}').set({'date': date_str, 'streak': streak})
+        # .update() 而不是 .set()，這樣才不會把 dates 底下累積的簽到歷史一起蓋掉——
+        # set() 是整個節點覆寫，update() 才是只改指定的幾個 key，'dates/xxx' 這種
+        # 帶斜線的 key 是 Firebase Admin SDK 支援的巢狀路徑寫法。
+        db.reference(f'{CHECKIN_PATH}/{user_id}').update({
+            'date': date_str,
+            'streak': streak,
+            f'dates/{date_str}': True,
+        })
     except Exception as e:
         print(f"[MIKU39] 更新簽到資料失敗: {e}")
+
+def _get_checked_dates(user_id):
+    """回傳這個使用者「所有」簽到過的日期字串集合（給行事曆畫圖用，呼叫端
+    自己篩選要哪個月份）。"""
+    data = _get_checkin_data(user_id)
+    if not data:
+        return set()
+    return set((data.get('dates') or {}).keys())
 
 # --- 好感度／羈絆等級系統：把 /運勢、/抽卡 這些互動串成一條養成線，每次使用
 # 都會累積經驗值，升級解鎖額外內容。等級公式用固定每級 EXP_PER_LEVEL 點經驗
@@ -672,9 +688,10 @@ def register_commands(bot):
         total = len(BEAUTY_IMAGES) + len(custom_images)
         await ctx.send(f"🗑️ 已從精選圖庫移除這張圖！（目前精選圖庫共 {total} 張）")
 
-    @bot.hybrid_command(name="簽到", description="每日簽到，連續簽到經驗值獎勵會越來越多")
+    @bot.hybrid_command(name="簽到", description="每日簽到，連續簽到經驗值獎勵會越來越多，還會附上一張簽到行事曆")
     async def checkin_command(ctx):
         uid = str(ctx.author.id)
+        now = datetime.now(timezone.utc)
         today = _today_str()
         data = _get_checkin_data(uid) or {}
         last_date = data.get('date')
@@ -686,26 +703,30 @@ def register_commands(bot):
                 description=f"目前連續簽到 **{prev_streak}** 天，明天再來吧～",
                 color=discord.Color.from_str("#39C5BB")
             )
-            await ctx.send(embed=embed)
-            return
+        else:
+            streak = prev_streak + 1 if last_date == _yesterday_str() else 1
+            exp_gained = CHECKIN_BASE_EXP + min(streak, CHECKIN_STREAK_EXP_CAP)
+            _save_checkin(uid, today, streak)
+            _add_exp(uid, exp_gained)
 
-        streak = prev_streak + 1 if last_date == _yesterday_str() else 1
-        exp_gained = CHECKIN_BASE_EXP + min(streak, CHECKIN_STREAK_EXP_CAP)
-        _save_checkin(uid, today, streak)
-        _add_exp(uid, exp_gained)
-
-        embed = discord.Embed(
-            title="✅ 簽到成功！",
-            description=f"連續簽到 **{streak}** 天　獲得 **{exp_gained}** 點好感度經驗值",
-            color=discord.Color.from_str("#39C5BB")
-        )
-        if streak > 1 and streak % CHECKIN_MILESTONE_DAYS == 0:
-            embed.add_field(
-                name="🎉 連續里程碑！",
-                value=f"已經連續 {streak} 天了，Miku 好感動！繼續保持下去唷～",
-                inline=False
+            embed = discord.Embed(
+                title="✅ 簽到成功！",
+                description=f"連續簽到 **{streak}** 天　獲得 **{exp_gained}** 點好感度經驗值",
+                color=discord.Color.from_str("#39C5BB")
             )
-        await ctx.send(embed=embed)
+            if streak > 1 and streak % CHECKIN_MILESTONE_DAYS == 0:
+                embed.add_field(
+                    name="🎉 連續里程碑！",
+                    value=f"已經連續 {streak} 天了，Miku 好感動！繼續保持下去唷～",
+                    inline=False
+                )
+
+        # 畫這個月的簽到行事曆，已簽到的日期會蓋上 Miku 印章
+        checked_dates = _get_checked_dates(uid)
+        calendar_buf = render_checkin_calendar(now.year, now.month, checked_dates, today)
+        calendar_file = discord.File(calendar_buf, filename="checkin_calendar.png")
+        embed.set_image(url="attachment://checkin_calendar.png")
+        await ctx.send(embed=embed, file=calendar_file)
 
     @bot.hybrid_command(name="好感度", description="查看你跟 Miku 的羈絆等級與解鎖進度")
     async def affinity_command(ctx):
