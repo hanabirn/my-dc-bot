@@ -12,6 +12,7 @@ import threading
 # 保持您原本的導入
 from mikuCommands import register_commands
 from osu_interactions import handle_play_interactions
+from vocabQuizCommands import register_vocab_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -47,6 +48,7 @@ bot = commands.Bot(command_prefix="bot ", intents=intents, help_command=None)
 GUILD = discord.Object(id=1505477519753609226)
 
 register_commands(bot)
+register_vocab_commands(bot)
 
 async def handle_osu_message(message: discord.Message):
     await asyncio.sleep(1.5)
