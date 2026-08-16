@@ -273,6 +273,36 @@ def _collection_progress(user_cards):
     collected = len(set(user_cards) & curated_pool)
     return collected, len(curated_pool)
 
+# --- 每日打工：跟 /簽到 一樣是每天限一次的額外好感度經驗值來源，但沒有連續
+# 天數加成，單純就是「今天做過了沒」，成本最低的一種每日習慣。
+WORK_PATH = 'miku_gacha/work'
+WORK_EXP_MIN = 4
+WORK_EXP_MAX = 8
+WORK_MESSAGES = [
+    "去 livehouse 打工搬音響，賺到了一些好感度經驗值！🎸",
+    "幫忙錄音室調音一整天，Miku 對你刮目相看～🎧",
+    "在演唱會賣周邊商品，跟粉絲聊得很開心！🎤",
+    "幫 Miku 寫了一段新歌詞，靈感被稱讚了一番！🎶",
+    "顧攤位賣蔥造型周邊，業績嚇嚇叫！🧅",
+]
+
+def _get_last_work_date(user_id):
+    if not firebase_admin._apps:
+        return None
+    try:
+        return db.reference(f'{WORK_PATH}/{user_id}').get()
+    except Exception as e:
+        print(f"[MIKU39] 讀取打工紀錄失敗: {e}")
+        return None
+
+def _save_work_date(user_id, date_str):
+    if not firebase_admin._apps:
+        return
+    try:
+        db.reference(f'{WORK_PATH}/{user_id}').set(date_str)
+    except Exception as e:
+        print(f"[MIKU39] 更新打工紀錄失敗: {e}")
+
 def _migrate_local_collections_to_firebase():
     """一次性搬遷：如果容器裡還留著舊版的 userPools.json，且 Firebase 那邊的
     珍藏庫路徑目前是空的，就把本機資料搬過去，避免這次改版直接把使用者手上
@@ -538,6 +568,60 @@ def register_commands(bot):
         view = PoolView(ctx.author.id, user_cards)
         await ctx.send(embed=view.get_embed(), view=view)
 
+    @bot.hybrid_command(name="贈送", description="把珍藏庫裡的一張圖送給其他人")
+    @app_commands.describe(member="要贈送的對象", url="要送出的圖片網址（跟 /珍藏庫 裡看到的一樣）")
+    async def gift_command(ctx, member: discord.Member, url: str):
+        if member.id == ctx.author.id:
+            await ctx.send("❌ 不能送給自己啦！")
+            return
+        if member.bot:
+            await ctx.send("❌ 不能送給機器人喔！")
+            return
+
+        sender_id = str(ctx.author.id)
+        sender_collection = get_user_collection(sender_id)
+        if url not in sender_collection:
+            await ctx.send("❌ 你的珍藏庫裡沒有這張圖，沒辦法送出去喔！（網址要跟 `/珍藏庫` 裡顯示的一模一樣）")
+            return
+
+        recipient_id = str(member.id)
+        recipient_collection = get_user_collection(recipient_id)
+        if url in recipient_collection:
+            await ctx.send(f"⚠️ {member.mention} 已經有這張圖囉，不需要再送一次～")
+            return
+
+        sender_collection.remove(url)
+        save_user_collection(sender_id, sender_collection)
+        recipient_collection.append(url)
+        save_user_collection(recipient_id, recipient_collection)
+
+        embed = discord.Embed(
+            title="🎁 贈送成功！",
+            description=f"{ctx.author.mention} 把一張美圖送給了 {member.mention}！",
+            color=discord.Color.from_str("#39C5BB")
+        )
+        embed.set_image(url=url)
+        await ctx.send(embed=embed)
+
+    @bot.hybrid_command(name="打工", description="每日打工賺一點好感度經驗值")
+    async def work_command(ctx):
+        uid = str(ctx.author.id)
+        today = _today_str()
+        if _get_last_work_date(uid) == today:
+            await ctx.send("💤 今天已經打工過囉，明天再來吧！")
+            return
+
+        exp_gained = random.randint(WORK_EXP_MIN, WORK_EXP_MAX)
+        _save_work_date(uid, today)
+        _add_exp(uid, exp_gained)
+
+        embed = discord.Embed(
+            title="💼 打工完成！",
+            description=f"{random.choice(WORK_MESSAGES)}\n獲得 **{exp_gained}** 點好感度經驗值",
+            color=discord.Color.from_str("#39C5BB")
+        )
+        await ctx.send(embed=embed)
+
     @bot.hybrid_command(name="加圖", description="（僅限主人）新增一張圖片網址到精選圖庫")
     @app_commands.describe(url="圖片網址（需以 http:// 或 https:// 開頭）")
     async def add_image_command(ctx, url: str):
@@ -662,8 +746,10 @@ def register_commands(bot):
         embed.add_field(name="`/運勢`", value="抽一次今日運勢籤詩，每天限抽一次（如果你已經在 Osu Bot 用過 `/link` 綁定帳號，運勢會偷偷參考你最近的 osu! 排名升降喔）", inline=False)
         embed.add_field(name="`/抽卡`", value=f"隨機抽一張美圖，分 ⚪N／🔵R／🟣SR 三種稀有度，可以收藏到珍藏庫。每日限抽 {GACHA_DAILY_LIMIT} 次，連續 {GACHA_PITY_THRESHOLD} 次沒中 R 以上會自動保底！", inline=False)
         embed.add_field(name="`/珍藏庫`", value="翻看你收藏的美圖，可以上一張／下一張／移除", inline=False)
+        embed.add_field(name="`/贈送 @對象 [網址]`", value="把珍藏庫裡的一張圖送給其他人", inline=False)
         embed.add_field(name="`/簽到`", value="每日簽到，連續簽到經驗值獎勵會越來越多，中斷一天就重新從第 1 天算起", inline=False)
-        embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡`、`/簽到` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
+        embed.add_field(name="`/打工`", value="每日打工賺一點好感度經驗值", inline=False)
+        embed.add_field(name="`/好感度`", value="查看你跟 Miku 的羈絆等級，`/運勢`、`/抽卡`、`/簽到`、`/打工` 都會累積經驗值，升級解鎖隱藏籤詩、保底門檻降低等內容", inline=False)
         owner_id = os.getenv("MIKU_OWNER_ID")
         if owner_id and str(ctx.author.id) == owner_id:
             embed.add_field(name="`/加圖 [網址]`", value="（僅限主人）把新的圖片網址加進精選圖庫，立即生效不用重新部署", inline=False)
