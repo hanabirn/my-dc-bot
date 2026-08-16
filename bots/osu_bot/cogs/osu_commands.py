@@ -69,6 +69,18 @@ OSU_NEWS_PAGE_BASE = "https://osu.ppy.sh/home/news/"
 
 WYBIN_GAMEMODE_NAMES = {0: "⭕ osu!", 1: "🥁 Taiko", 2: "🍎 Catch", 3: "🎹 Mania"}
 
+# 賽事公告嵌入訊息的強調色：照官方模式配色分開上色，不要每一則公告都用同一種
+# 粉紅色糊在一起——wyBin（數字模式 id）跟論壇（偵測出來的文字標籤）剛好共用
+# 同一組 WYBIN_GAMEMODE_NAMES／_TOURNAMENT_MODE_PATTERNS 標籤字串，所以兩邊都能
+# 直接用這張表查顏色。
+MODE_COLORS = {
+    "⭕ osu!": discord.Color.from_rgb(255, 102, 170),
+    "🥁 Taiko": discord.Color.from_rgb(255, 111, 97),
+    "🍎 Catch": discord.Color.from_rgb(140, 209, 74),
+    "🎹 Mania": discord.Color.from_rgb(108, 99, 255),
+}
+DEFAULT_MODE_COLOR = discord.Color.from_rgb(255, 102, 170)
+
 # 論壇賽事區的 API 沒有結構化的模式欄位，只能從標題慣例猜（例如 "[Taiko] ..."），
 # 跟網站前端 detectTournamentMode() 用同一套規則，順序重要：mania 的 tag 常包含
 # "osu!" 字樣（如 "[osu!mania 4k]"），所以要先比對比較精確的 mania/taiko/catch
@@ -616,16 +628,21 @@ class OsuCommands(commands.Cog):
         embed = discord.Embed(
             title=f"🏆 新賽事公告：{item.get('name') or '未知賽事'}",
             url=WYBIN_TOURNAMENT_BASE + slug,
-            description=f"**{item.get('acronym', '')}** ｜ {mode_name}",
-            color=discord.Color.from_rgb(255, 102, 170)
+            color=MODE_COLORS.get(mode_name, DEFAULT_MODE_COLOR)
         )
+        embed.add_field(name="🎮 模式", value=mode_name, inline=True)
+        if item.get('acronym'):
+            embed.add_field(name="🏷️ 簡稱", value=item['acronym'], inline=True)
         tags = item.get('tags')
         if tags:
             embed.add_field(name="標籤", value=tags, inline=False)
         thumb = item.get('headerImageThumb')
         if thumb and slug:
-            embed.set_image(url=f"{WYBIN_UPLOADS_BASE}{slug}/{thumb}")
+            # 原本用 set_image（跨版面通欄）硬撐一張本來就是縮圖尺寸的小圖，會被拉
+            # 得糊糊的很擠；改用 set_thumbnail 讓它乖乖待在右上角一小塊，尺寸才合理
+            embed.set_thumbnail(url=f"{WYBIN_UPLOADS_BASE}{slug}/{thumb}")
         embed.set_footer(text="資料來源：wyBin")
+        embed.timestamp = discord.utils.utcnow()
         return embed
 
     def _build_forum_embed(self, topic):
@@ -633,12 +650,13 @@ class OsuCommands(commands.Cog):
         embed = discord.Embed(
             title=f"📢 osu! 賽事公告：{topic.get('title') or '未知標題'}",
             url=OSU_FORUM_TOPIC_BASE + str(topic.get('id')),
-            description=mode_name,
-            color=discord.Color.from_rgb(255, 102, 170)
+            color=MODE_COLORS.get(mode_name, DEFAULT_MODE_COLOR)
         )
+        embed.add_field(name="🎮 模式", value=mode_name, inline=True)
         embed.add_field(name="💬 回覆數", value=f"{topic.get('post_count', 0)}", inline=True)
         embed.add_field(name="👁 瀏覽數", value=f"{topic.get('views', 0)}", inline=True)
         embed.set_footer(text="資料來源：osu! 官方論壇 Tournaments 討論區")
+        embed.timestamp = discord.utils.utcnow()
         return embed
 
     async def _check_osu_news(self):
@@ -685,6 +703,7 @@ class OsuCommands(commands.Cog):
             embed.set_image(url=image)
         author = post.get('author')
         embed.set_footer(text=f"作者：{author} ｜ 資料來源：osu! 官方新聞" if author else "資料來源：osu! 官方新聞")
+        embed.timestamp = discord.utils.utcnow()
         return embed
 
     # 1. 指令 !link
