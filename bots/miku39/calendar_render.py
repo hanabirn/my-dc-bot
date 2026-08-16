@@ -11,12 +11,11 @@ import calendar as cal_module
 import math
 import os
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 
 MIKU_TEAL = (57, 197, 187)
 MIKU_TEAL_DEEP = (16, 138, 128)
 MIKU_TEAL_SOFT = (163, 230, 222)
-BG_COLOR = (247, 253, 252)
 CARD_COLOR = (255, 255, 255)
 CELL_COLOR = (245, 252, 251)
 CELL_CHECKED_COLOR = (223, 247, 243)
@@ -38,8 +37,11 @@ CELL_W = 64
 CELL_H = 60
 HEADER_H = 50
 WEEKDAY_H = 30
-MARGIN = 14
+OUTER_PAD = 18  # 卡片外面留出來給漸層底色露臉的邊框寬度
+MARGIN = OUTER_PAD + 10  # 內容跟卡片邊緣之間的留白（卡片本身從 OUTER_PAD 開始畫）
 RADIUS = 12
+GRADIENT_FROM = (214, 245, 240)  # 薄荷藍（跟標題橫幅同色系）
+GRADIENT_TO = (255, 232, 240)    # 淡粉（跟今天外框同色系），左到右淡淡過渡
 
 _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 _STICKER_PATH = os.path.join(_ASSET_DIR, "miku_stamp.png")
@@ -120,6 +122,34 @@ def _draw_miku_stamp_vector(draw, cx, cy, r):
               start=20, end=160, fill=FACE_LINE, width=max(1, round(r * 0.08)))
 
 
+def _build_background(w, h):
+    """畫布最底層：左到右的薄荷藍→淡粉漸層（跟卡片內的配色同一組色系，不會突兀），
+    再疊一層柔化過的陰影，讓白色卡片有種輕輕浮起來的立體感。純用 PIL 內建的
+    linear_gradient+colorize+GaussianBlur 做，沒有額外素材依賴。"""
+    grad = Image.linear_gradient("L").transpose(Image.ROTATE_90).resize((w, h))
+    bg = ImageOps.colorize(grad, black=GRADIENT_FROM, white=GRADIENT_TO).convert("RGBA")
+
+    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sdraw = ImageDraw.Draw(shadow)
+    sdraw.rounded_rectangle(
+        [OUTER_PAD + 3, OUTER_PAD + 5, w - OUTER_PAD + 3, h - OUTER_PAD + 5],
+        radius=RADIUS + 4, fill=(30, 70, 65, 70)
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(4))
+    bg = Image.alpha_composite(bg, shadow)
+
+    # 邊框空間裡點綴幾顆極淡的小星星，純裝飾、不搶內容的視線
+    ddraw = ImageDraw.Draw(bg)
+    for sx, sy, sr, sfill in (
+        (26, h - 22, 4, (255, 255, 255, 130)),
+        (w - 30, 24, 3, (255, 255, 255, 120)),
+        (w - 22, h - 30, 5, (255, 255, 255, 110)),
+    ):
+        _draw_star(ddraw, sx, sy, r_outer=sr, r_inner=sr * 0.42, fill=sfill)
+
+    return bg.convert("RGB")
+
+
 def _stamp_checkin_cell(img, draw, cx, cy, r):
     """已簽到格子的印章：優先貼真的 Miku 貼圖素材，讀取失敗才退回向量畫的版本。"""
     if _STICKER_IMG is not None:
@@ -142,11 +172,12 @@ def render_checkin_calendar(year: int, month: int, checked_dates: set, today_str
     width = MARGIN * 2 + CELL_W * 7
     height = MARGIN * 2 + HEADER_H + WEEKDAY_H + CELL_H * len(weeks)
 
-    img = Image.new("RGB", (width, height), BG_COLOR)
+    img = _build_background(width, height)
     draw = ImageDraw.Draw(img)
 
-    # 卡片底：整個行事曆畫在一張圓角白卡上，跟外層底色拉開層次
-    draw.rounded_rectangle([4, 4, width - 4, height - 4], radius=RADIUS + 4, fill=CARD_COLOR)
+    # 卡片底：整個行事曆畫在一張圓角白卡上，跟漸層底色拉開層次
+    draw.rounded_rectangle([OUTER_PAD, OUTER_PAD, width - OUTER_PAD, height - OUTER_PAD],
+                            radius=RADIUS + 4, fill=CARD_COLOR)
 
     # 標題橫幅（薄荷藍為主色，兩側各點綴一個音符，呼應「音樂系 bot」的品牌識別）
     title_font = _font(18)
