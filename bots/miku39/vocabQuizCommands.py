@@ -12,6 +12,10 @@ js/quiz.js 的 SHEETS.kr / SHEETS.fr / SHEETS.en 同一份 Google Sheet——這
 是給人閱讀用的「一列印好幾組單字」排版（每組是 word/中文意思/英文 的一個區塊，
 橫向重複好幾組），欄位起始位置跟網站版的 parseKorean/parseFrench/parseEnglish
 一致，只是這裡用 Python 重新實作一次同樣的欄位規則。
+
+TOPIK（韓文檢定）分級題庫則跟 JLPT 一樣是「一列一個單字」的乾淨格式
+（word,meaning,english），跟網站版的 TOPIK_SHEETS/parseTopikVocab 對應——但
+韓文本身就是表音文字，沒有漢字讀音好考，所以固定都是意思題。
 """
 import csv
 import io
@@ -36,11 +40,22 @@ FLAT_SHEETS = {
     "en": "https://docs.google.com/spreadsheets/d/1Uof80EqNrC3SrtAcce0OgQDr_MRpqcxCQCb2oQS4I0s/export?format=csv&gid=0",
 }
 
+# TOPIK_SHEETS 的 key 是純等級數字（"1".."4"），跟網站版 TOPIK_SHEETS 的
+# topik_1..topik_4 對應；統一的 quiz key 命名空間裡則用 "TOPIK1".."TOPIK4"
+# 前綴版本，避免跟其他語言的 key 混淆（見 _fetch_vocab_pools/_quiz_label）。
+TOPIK_SHEETS = {
+    "1": "https://docs.google.com/spreadsheets/d/1XJTpFBly3hRNBBBnZoAzJneOXwJajbC4KqniSRfSPUg/export?format=csv&gid=0",
+    "2": "https://docs.google.com/spreadsheets/d/1FBjH5ObsgShVevgMcXXJDmsmh0JQBzk6DDsJAyi6kaE/export?format=csv&gid=0",
+    "3": "https://docs.google.com/spreadsheets/d/1pVOTCK3e2OgAhdktgVb29j4vUlKpmIULk2OnkiPeNA0/export?format=csv&gid=0",
+    "4": "https://docs.google.com/spreadsheets/d/1UZJ29Jxl8pjM4eZREWKed8YRkPpjRIKkSfzfYFaAlig/export?format=csv&gid=0",
+}
+
 _QUIZ_LABELS = {"kr": "韓文", "fr": "法文", "en": "英文"}
 
 # {key: (fetched_at_epoch_seconds, (reading_pool, meaning_pool))} — each pool is a
 # list of {"word":..., "kana":..., "meaning":..., "english":...}. key is a JLPT
-# level ("N5".."N1") or a flat-language code ("kr"/"fr"/"en").
+# level ("N5".."N1"), a TOPIK level ("TOPIK1".."TOPIK4"), or a flat-language
+# code ("kr"/"fr"/"en").
 _VOCAB_CACHE = {}
 _CACHE_TTL_SECONDS = 3600
 
@@ -127,10 +142,24 @@ def _parse_english_meaning_pool(rows):
     return pool
 
 
+def _parse_topik_pool(rows):
+    """TOPIK 表格排版：跟 JLPT 一樣一列一個單字，只是沒有讀音欄——
+    word,meaning,english（跟網站版 parseTopikVocab 一致）。"""
+    pool = []
+    for row in rows[1:]:  # 第一列是表頭：韓文單字,繁體中文翻譯,English
+        if len(row) < 3:
+            continue
+        word, meaning, english = row[0].strip(), row[1].strip(), row[2].strip()
+        if not _is_valid_word(word, meaning):
+            continue
+        pool.append({"word": word, "kana": "", "meaning": meaning, "english": english})
+    return pool
+
+
 def _fetch_vocab_pools(key):
     """回傳 (reading_pool, meaning_pool)。JLPT 等級才有 reading_pool（含漢字、拿
-    來出讀音題的單字），韓文/法文/英文的 reading_pool 永遠是空的——全部都出
-    意思題。"""
+    來出讀音題的單字），其他語言（韓文/法文/英文/TOPIK）的 reading_pool 永遠是
+    空的——全部都出意思題。"""
     cached = _VOCAB_CACHE.get(key)
     if cached and time.time() - cached[0] < _CACHE_TTL_SECONDS:
         return cached[1]
@@ -144,6 +173,9 @@ def _fetch_vocab_pools(key):
     elif key == "en":
         rows = _download_csv_rows(FLAT_SHEETS[key])
         pools = ([], _parse_english_meaning_pool(rows))
+    elif key.startswith("TOPIK") and key[5:] in TOPIK_SHEETS:
+        rows = _download_csv_rows(TOPIK_SHEETS[key[5:]])
+        pools = ([], _parse_topik_pool(rows))
     else:
         raise ValueError(f"unknown quiz key: {key}")
 
@@ -306,7 +338,11 @@ def _truncate_label(text, limit=80):
 
 
 def _quiz_label(key):
-    return f"JLPT {key}" if key in JLPT_SHEETS else _QUIZ_LABELS[key]
+    if key in JLPT_SHEETS:
+        return f"JLPT {key}"
+    if key.startswith("TOPIK"):
+        return f"TOPIK {key[5:]}"
+    return _QUIZ_LABELS[key]
 
 
 def _make_question_embed(session):
@@ -567,6 +603,14 @@ def register_vocab_commands(bot):
     @bot.hybrid_command(name="韓文單字測驗", description="韓文單字意思選擇題，可指定題數")
     async def vocab_quiz_kr(ctx, count: discord.app_commands.Range[int, 1, 20] = 5):
         await _start_quiz(ctx, "kr", count)
+
+    @bot.hybrid_command(name="韓文檢定", description="TOPIK 韓文單字意思選擇題，可指定等級與題數")
+    async def vocab_quiz_topik(
+        ctx,
+        level: Literal["1", "2", "3", "4"] = "1",
+        count: discord.app_commands.Range[int, 1, 20] = 5,
+    ):
+        await _start_quiz(ctx, f"TOPIK{level}", count)
 
     @bot.hybrid_command(name="法文單字測驗", description="法文單字意思選擇題，可指定題數")
     async def vocab_quiz_fr(ctx, count: discord.app_commands.Range[int, 1, 20] = 5):
