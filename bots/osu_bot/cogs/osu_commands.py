@@ -531,6 +531,21 @@ class OsuCommands(commands.Cog):
     async def before_check_tournaments(self):
         await self.bot.wait_until_ready()
 
+    @staticmethod
+    def _normalize_seen_dict(raw):
+        """Firebase Realtime Database 有個常見陷阱：如果一個節點底下的 key 剛好
+        全部都是像 "0"、"1"、"2"... 這種從 0 開始的連續數字字串，讀回來的時候會
+        自動被 SDK 當成 JSON 陣列（list）而不是物件（dict）。wyBin／論壇/新聞的
+        賽事 id 常常真的是這種小整數，一旦踩到就會變成 list，後面
+        `seen[str(id)] = True` 這種當 dict 在用的寫法就會直接丟
+        TypeError: list indices must be integers or slices, not str。
+        這裡統一把讀回來的結果正規化成 dict，不管 Firebase 這次回傳的是哪一種。"""
+        if isinstance(raw, list):
+            return {str(i): True for i, v in enumerate(raw) if v}
+        if isinstance(raw, dict):
+            return raw
+        return {}
+
     async def _check_wybin_tournaments(self):
         channel = self.bot.get_channel(TOURNAMENT_CHANNEL_ID)
         if not channel:
@@ -545,7 +560,7 @@ class OsuCommands(commands.Cog):
             return
 
         seen_ref = db.reference('tournament_announce/wybin_seen')
-        seen = seen_ref.get() or {}
+        seen = self._normalize_seen_dict(seen_ref.get())
         is_first_run = len(seen) == 0
         new_items = [item for item in items if str(item.get('id')) not in seen]
 
@@ -577,7 +592,7 @@ class OsuCommands(commands.Cog):
             return
 
         seen_ref = db.reference('tournament_announce/forum_seen')
-        seen = seen_ref.get() or {}
+        seen = self._normalize_seen_dict(seen_ref.get())
         is_first_run = len(seen) == 0
         new_topics = [t for t in topics if str(t.get('id')) not in seen]
 
@@ -640,7 +655,7 @@ class OsuCommands(commands.Cog):
             return
 
         seen_ref = db.reference('tournament_announce/news_seen')
-        seen = seen_ref.get() or {}
+        seen = self._normalize_seen_dict(seen_ref.get())
         is_first_run = len(seen) == 0
         new_posts = [p for p in posts if str(p.get('id')) not in seen]
 
