@@ -52,6 +52,11 @@ def build_env(env_map):
         if value is not None:
             env[target_name] = value
     env["SUPERVISED"] = "1"
+    # stdout 導到管線（不是終端機）時 Python 預設會整批緩衝，子程序裡零星的
+    # print() 可能長時間卡在緩衝區裡、在 Render 的 log 上完全看不到（但走
+    # logging 模組的輸出，例如 discord.py 自己的登入/連線訊息，不受影響，這也是
+    # 為什麼三隻 bot 明明都正常啟動、log 裡卻找不到任何 print() 訊息的原因）。
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
