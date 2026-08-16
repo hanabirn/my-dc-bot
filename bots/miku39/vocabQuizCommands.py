@@ -1,4 +1,4 @@
-"""日文單字測驗（JLPT 選擇題）——從「我的網站」的 js/quiz.js 移植過來的出題邏輯：
+"""多語言單字測驗——從「我的網站」的 js/quiz.js 移植過來的出題邏輯：
 JLPT 各級 Google Sheet 是同一份共用試算表格式（word,kana,meaning,english）。單字依
 「是否含漢字」分成兩個題庫、各自考不同題型（跟網站版 addWord() 的池子分流規則一致）：
   - 含漢字的單字（含漢字+假名混合，例如「話す」）→ 讀音題，錯誤選項用 mutate_kana()
@@ -6,6 +6,12 @@ JLPT 各級 Google Sheet 是同一份共用試算表格式（word,kana,meaning,e
     單字讀音，出題風格才會貼近真正的 JLPT 讀音選擇題。
   - 不含漢字的純假名單字（平假名或片假名，例如「スポーツ」）→ 意思題，因為這種字本身
     就是讀音了，沒有讀音好考，錯誤選項改成隨機抓題庫裡其他單字的中文意思。
+
+韓文/法文/英文沒有漢字讀音這種東西可以考，全部都是意思題，題庫來自跟網站版
+js/quiz.js 的 SHEETS.kr / SHEETS.fr / SHEETS.en 同一份 Google Sheet——這幾份表格
+是給人閱讀用的「一列印好幾組單字」排版（每組是 word/中文意思/英文 的一個區塊，
+橫向重複好幾組），欄位起始位置跟網站版的 parseKorean/parseFrench/parseEnglish
+一致，只是這裡用 Python 重新實作一次同樣的欄位規則。
 """
 import csv
 import io
@@ -24,8 +30,17 @@ JLPT_SHEETS = {
     "N1": "https://docs.google.com/spreadsheets/d/1zHezXxlkiSKsIzFCyUMBCLRNOxQV0zwvAgYnMFqnQ38/export?format=csv&gid=0",
 }
 
-# {level: (fetched_at_epoch_seconds, (reading_pool, meaning_pool))} — each pool is a
-# list of {"word":..., "kana":..., "meaning":..., "english":...}
+FLAT_SHEETS = {
+    "kr": "https://docs.google.com/spreadsheets/d/1BsO7tpzFgO39AyBo2SV1RZFDWfPECB-LzWBGA87nbQA/export?format=csv&gid=0",
+    "fr": "https://docs.google.com/spreadsheets/d/1Ki0fuTZb1netmpSOBd8uJbZnYhgtD17aEtGQb3Ehb3Y/export?format=csv&gid=0",
+    "en": "https://docs.google.com/spreadsheets/d/1Uof80EqNrC3SrtAcce0OgQDr_MRpqcxCQCb2oQS4I0s/export?format=csv&gid=0",
+}
+
+_QUIZ_LABELS = {"kr": "韓文", "fr": "法文", "en": "英文"}
+
+# {key: (fetched_at_epoch_seconds, (reading_pool, meaning_pool))} — each pool is a
+# list of {"word":..., "kana":..., "meaning":..., "english":...}. key is a JLPT
+# level ("N5".."N1") or a flat-language code ("kr"/"fr"/"en").
 _VOCAB_CACHE = {}
 _CACHE_TTL_SECONDS = 3600
 
@@ -34,27 +49,39 @@ def _has_kanji(s):
     return any(0x4E00 <= ord(c) <= 0x9FAF for c in s)
 
 
-def _fetch_vocab_pools(level):
-    """回傳 (reading_pool, meaning_pool)：前者是含漢字、拿來出讀音題的單字；
-    後者是純假名、拿來出意思題的單字。"""
-    cached = _VOCAB_CACHE.get(level)
-    if cached and time.time() - cached[0] < _CACHE_TTL_SECONDS:
-        return cached[1]
+def _is_valid_word(word, meaning):
+    """網站版 isValidWord() 的 Python 版本——濾掉表頭文字外洩到資料列的髒資料
+    （像「單字」「意思」「Video」這些欄位標題字樣，或是純數字的列編號）。"""
+    if not word or not meaning:
+        return False
+    junk_in_word = ("動畫", "動画", "동영상", "註", "★", "單字")
+    junk_in_meaning = ("動畫", "動画", "意思", "註")
+    if any(j in word for j in junk_in_word):
+        return False
+    if any(j in meaning for j in junk_in_meaning):
+        return False
+    if word.isdigit():
+        return False
+    return True
 
-    resp = requests.get(JLPT_SHEETS[level], timeout=10)
+
+def _download_csv_rows(url):
+    resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     # Google's CSV export doesn't send a charset in Content-Type, so requests
     # falls back to guessing (often wrong) instead of reading it as UTF-8.
     reader = csv.reader(io.StringIO(resp.content.decode("utf-8")))
-    rows = list(reader)
+    return list(reader)
 
+
+def _parse_jlpt_pools(rows):
     reading_pool = []
     meaning_pool = []
     for row in rows[1:]:  # 第一列是表頭：word,kana,meaning,english
         if len(row) < 4:
             continue
         word, kana, meaning, english = row[0].strip(), row[1].strip(), row[2].strip(), row[3].strip()
-        if not word or not meaning:
+        if not _is_valid_word(word, meaning):
             continue
         entry = {"word": word, "kana": kana, "meaning": meaning, "english": english}
         if _has_kanji(word):
@@ -62,10 +89,66 @@ def _fetch_vocab_pools(level):
                 reading_pool.append(entry)
         else:
             meaning_pool.append(entry)
+    return reading_pool, meaning_pool
 
-    pools = (reading_pool, meaning_pool)
-    if reading_pool or meaning_pool:
-        _VOCAB_CACHE[level] = (time.time(), pools)
+
+def _parse_stride5_meaning_pool(rows):
+    """韓文/法文表格排版：每列橫向排 4 組「編號,單字,中文意思,英文,(空白)」，
+    組與組之間欄位間隔 5（起始欄位 2,7,12,17），跟網站版 parseKorean/
+    parseFrench 讀到的組數一致（表格裡其實留了第 5 組的欄位，但那組實際上是
+    空的，網站版本來就沒讀它，這裡也不用特別處理）。"""
+    pool = []
+    for row in rows:
+        for offset in (2, 7, 12, 17):
+            if offset + 1 >= len(row):
+                continue
+            word = row[offset].strip()
+            meaning = row[offset + 1].strip()
+            english = row[offset + 2].strip() if offset + 2 < len(row) else ""
+            if not _is_valid_word(word, meaning):
+                continue
+            pool.append({"word": word, "kana": "", "meaning": meaning, "english": english})
+    return pool
+
+
+def _parse_english_meaning_pool(rows):
+    """英文表格排版：每列橫向排 5 組「編號,單字,中文意思,Video,(空白)」，組與
+    組之間欄位間隔 4（起始欄位 2,6,10,14,18），跟網站版 parseEnglish 一致。"""
+    pool = []
+    for row in rows:
+        for offset in (2, 6, 10, 14, 18):
+            if offset + 1 >= len(row):
+                continue
+            word = row[offset].strip()
+            meaning = row[offset + 1].strip()
+            if not _is_valid_word(word, meaning):
+                continue
+            pool.append({"word": word, "kana": "", "meaning": meaning, "english": ""})
+    return pool
+
+
+def _fetch_vocab_pools(key):
+    """回傳 (reading_pool, meaning_pool)。JLPT 等級才有 reading_pool（含漢字、拿
+    來出讀音題的單字），韓文/法文/英文的 reading_pool 永遠是空的——全部都出
+    意思題。"""
+    cached = _VOCAB_CACHE.get(key)
+    if cached and time.time() - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+
+    if key in JLPT_SHEETS:
+        rows = _download_csv_rows(JLPT_SHEETS[key])
+        pools = _parse_jlpt_pools(rows)
+    elif key in ("kr", "fr"):
+        rows = _download_csv_rows(FLAT_SHEETS[key])
+        pools = ([], _parse_stride5_meaning_pool(rows))
+    elif key == "en":
+        rows = _download_csv_rows(FLAT_SHEETS[key])
+        pools = ([], _parse_english_meaning_pool(rows))
+    else:
+        raise ValueError(f"unknown quiz key: {key}")
+
+    if pools[0] or pools[1]:
+        _VOCAB_CACHE[key] = (time.time(), pools)
     return pools
 
 
@@ -173,11 +256,11 @@ def _build_meaning_options(word_entry, pool):
     return options
 
 
-def _pick_question(level):
+def _pick_question(key):
     """回傳 (qtype, word_entry, options)，qtype 是 'reading' 或 'meaning'；
     兩個題庫都不夠出題時回傳 None。哪個題庫可以出題就出那種題型，兩個都夠的話
     隨機選一種——跟網站版 pickQuestionType() 的 50/50 邏輯一致。"""
-    reading_pool, meaning_pool = _fetch_vocab_pools(level)
+    reading_pool, meaning_pool = _fetch_vocab_pools(key)
     can_reading = len(reading_pool) >= 4
     can_meaning = len(meaning_pool) >= 4
     if not can_reading and not can_meaning:
@@ -222,15 +305,20 @@ def _truncate_label(text, limit=80):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def _quiz_label(key):
+    return f"JLPT {key}" if key in JLPT_SHEETS else _QUIZ_LABELS[key]
+
+
 def _make_question_embed(session):
     word_entry = session["word_entry"]
     qtype = session["qtype"]
     progress = f"第 {session['done'] + 1}/{session['total']} 題"
+    label = _quiz_label(session["key"])
     if qtype == "reading":
-        title = f"📖 JLPT {session['level']} 漢字讀音測驗　{progress}"
+        title = f"📖 {label} 漢字讀音測驗　{progress}"
         question = "這個漢字怎麼唸？"
     else:
-        title = f"📖 JLPT {session['level']} 單字意思測驗　{progress}"
+        title = f"📖 {label} 單字意思測驗　{progress}"
         question = "這個字是什麼意思？"
     embed = discord.Embed(
         title=title,
@@ -376,7 +464,7 @@ class NextQuestionView(discord.ui.View):
                 await interaction.response.send_message("這場測驗已經結束囉，打 /日文單字測驗 開新的一場吧！", ephemeral=True)
                 return
 
-            question = _pick_question(self.session["level"])
+            question = _pick_question(self.session["key"])
             if question is None:
                 self.acted = True
                 _ACTIVE_SESSIONS.pop(self.author_id, None)
@@ -432,47 +520,63 @@ class NextQuestionView(discord.ui.View):
                 pass
 
 
+async def _start_quiz(ctx, key, count):
+    if ctx.author.id in _ACTIVE_SESSIONS:
+        await ctx.send("你已經有一場測驗正在進行囉，先作答或打 /停止單字測驗 結束它吧！")
+        return
+
+    try:
+        question = _pick_question(key)
+    except requests.RequestException:
+        await ctx.send("⚠️ 題庫讀取失敗，等一下再試試看～")
+        return
+
+    if question is None:
+        await ctx.send(f"⚠️ {_quiz_label(key)}題庫目前題目太少，等一下再試試？")
+        return
+
+    qtype, word_entry, options = question
+    session = {
+        "key": key,
+        "total": count,
+        "done": 0,
+        "correct": 0,
+        "qtype": qtype,
+        "word_entry": word_entry,
+        "options": options,
+    }
+    _ACTIVE_SESSIONS[ctx.author.id] = session
+
+    view = VocabQuizView(ctx.author.id, session)
+    message = await ctx.send(embed=_make_question_embed(session), view=view)
+    view.message = message
+
+
 def register_vocab_commands(bot):
     @bot.hybrid_command(
         name="日文單字測驗",
         description="JLPT 選擇題（漢字讀音 + 假名單字意思），可指定等級與題數",
     )
-    async def vocab_quiz_command(
+    async def vocab_quiz_jp(
         ctx,
         level: Literal["N5", "N4", "N3", "N2", "N1"] = "N5",
         count: discord.app_commands.Range[int, 1, 20] = 5,
     ):
-        if ctx.author.id in _ACTIVE_SESSIONS:
-            await ctx.send("你已經有一場測驗正在進行囉，先作答或打 /停止單字測驗 結束它吧！")
-            return
+        await _start_quiz(ctx, level, count)
 
-        try:
-            question = _pick_question(level)
-        except requests.RequestException:
-            await ctx.send("⚠️ 題庫讀取失敗，等一下再試試看～")
-            return
+    @bot.hybrid_command(name="韓文單字測驗", description="韓文單字意思選擇題，可指定題數")
+    async def vocab_quiz_kr(ctx, count: discord.app_commands.Range[int, 1, 20] = 5):
+        await _start_quiz(ctx, "kr", count)
 
-        if question is None:
-            await ctx.send(f"⚠️ {level} 題庫目前題目太少，換個等級試試？")
-            return
+    @bot.hybrid_command(name="法文單字測驗", description="法文單字意思選擇題，可指定題數")
+    async def vocab_quiz_fr(ctx, count: discord.app_commands.Range[int, 1, 20] = 5):
+        await _start_quiz(ctx, "fr", count)
 
-        qtype, word_entry, options = question
-        session = {
-            "level": level,
-            "total": count,
-            "done": 0,
-            "correct": 0,
-            "qtype": qtype,
-            "word_entry": word_entry,
-            "options": options,
-        }
-        _ACTIVE_SESSIONS[ctx.author.id] = session
+    @bot.hybrid_command(name="英文單字測驗", description="英文單字意思選擇題，可指定題數")
+    async def vocab_quiz_en(ctx, count: discord.app_commands.Range[int, 1, 20] = 5):
+        await _start_quiz(ctx, "en", count)
 
-        view = VocabQuizView(ctx.author.id, session)
-        message = await ctx.send(embed=_make_question_embed(session), view=view)
-        view.message = message
-
-    @bot.hybrid_command(name="停止單字測驗", description="結束你正在進行的日文單字測驗")
+    @bot.hybrid_command(name="停止單字測驗", description="結束你正在進行的單字測驗")
     async def stop_vocab_quiz_command(ctx):
         session = _ACTIVE_SESSIONS.pop(ctx.author.id, None)
         if not session:
