@@ -46,11 +46,15 @@ def fetch_random_anime_image():
         print(f"[MIKU39] Safebooru 抓圖失敗（將改用精選圖庫）: {e}")
         return None
 
-# --- osu! 戰績串接（選用功能）：讀取 Osu Bot 寫進同一個 Firebase 的帳號綁定／排名
-# 資料（見 osu_bot/cogs/osu_commands.py 的 !link、!profile 排名追蹤），讓「bot 運勢」
-# 的抽籤結果偷偷參考最近的 osu! 排名升降。任何一步失敗（沒設定 Firebase/osu API 憑證、
-# 使用者沒綁定、查詢失敗...）都直接停用這個功能、退回完全隨機抽籤，不會影響 MIKU39
-# 原本的抽籤/抽卡/珍藏庫功能。
+# --- Firebase 初始化：注意這裡不是只影響下面的 osu! 戰績串接（選用功能）——
+# 這是整個檔案唯一一處呼叫 firebase_admin.initialize_app() 的地方，抽卡保底、
+# 精選圖庫、珍藏庫、好感度/EXP、每日運勢、簽到、打工全部都靠 firebase_admin._apps
+# 是否非空來決定要不要真的讀寫資料庫（各自的 _get_*/_save_* 開頭都有
+# `if not firebase_admin._apps: return`）。如果 Render 上 miku39 這支子程序沒有
+# 拿到 FIREBASE_CREDENTIALS，上面全部功能都會「指令照樣能跑、但資料完全不會被
+# 存起來」——不會噴錯，畫面上也不會有任何提示，只能從這裡的 log 看出來，所以
+# 「找不到憑證」這個分支特別印一行明顯的警告，不要跟下面 try/except 只印例外訊息
+# 的寫法混在一起、一聲不響就跳過。
 _osu_api = None
 try:
     if not firebase_admin._apps:
@@ -60,12 +64,23 @@ try:
             firebase_admin.initialize_app(_cred, {
                 'databaseURL': 'https://osu-discord-bot-56c1d-default-rtdb.firebaseio.com/'
             })
+            print("[MIKU39] Firebase 初始化成功，抽卡/珍藏庫/簽到/打工等持久化功能已啟用")
+        else:
+            print("[MIKU39] 警告：找不到 FIREBASE_CREDENTIALS 環境變數！"
+                  "抽卡保底、精選圖庫、珍藏庫、好感度、運勢、簽到、打工全部都不會存檔"
+                  "（指令仍然能執行，只是資料存不進去，重啟就消失）")
+
+    # osu! 戰績串接才是真的「選用功能」：讀取 Osu Bot 寫進同一個 Firebase 的帳號
+    # 綁定／排名資料（見 osu_bot/cogs/osu_commands.py 的 !link、!profile 排名追蹤），
+    # 讓「/運勢」的抽籤結果偷偷參考最近的 osu! 排名升降。沒設定 osu API 憑證、
+    # 使用者沒綁定、查詢失敗都只會讓這個小彩蛋停用、退回完全隨機抽籤，不影響上面
+    # 任何一個持久化功能。
     _client_id = os.getenv("OSU_CLIENT_ID")
     _client_secret = os.getenv("OSU_CLIENT_SECRET")
     if firebase_admin._apps and _client_id and _client_secret:
         _osu_api = Ossapi(int(_client_id), _client_secret)
 except Exception as e:
-    print(f"[MIKU39] osu! 戰績串接初始化失敗（將以純隨機運勢繼續運作）: {e}")
+    print(f"[MIKU39] Firebase／osu! 戰績串接初始化失敗: {e}")
     _osu_api = None
 
 # --- 精選圖庫的線上新增功能：BEAUTY_IMAGES 是寫死在程式碼裡的固定清單，改它需要
