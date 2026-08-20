@@ -82,6 +82,12 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"3 bots supervised and running")
 
+    def do_HEAD(self):
+        # UptimeRobot 免費方案預設用 HEAD 探測，這裡沒實作的話 BaseHTTPRequestHandler
+        # 會回 501，導致 monitor 一直誤判成 down、也可能沒被當成有效流量而喚醒休眠中的服務。
+        self.send_response(200)
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass  # 不印出每次健康檢查的 request log，避免洗版
 
