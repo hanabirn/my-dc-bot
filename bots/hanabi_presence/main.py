@@ -3,7 +3,7 @@
 小花火的指令（/quiz /grammar /dictionary /language /help）由 Cloudflare Worker
 hanabi-discord 透過 HTTP interactions 回答（程式在網站 repo 的 worker/discord/），
 Worker 沒辦法一直掛著 Discord 的 gateway 連線，所以成員列表會顯示離線。這支程式
-只做一件事：用小花火的 token 連上 gateway、顯示「正在玩 /help」。
+只做一件事：用小花火的 token 連上 gateway、顯示「正在玩 單字庫」。
 
 注意：
 - 不要在這裡建立或同步任何指令（不用 app_commands / tree.sync），否則會蓋掉
@@ -34,7 +34,7 @@ def main():
     client = Presence(
         intents=discord.Intents.none(),
         status=discord.Status.online,
-        activity=discord.Game(name="/help"),
+        activity=discord.Game(name="單字庫"),
     )
     client.run(TOKEN, log_handler=None)
 
