@@ -42,6 +42,15 @@ BOTS = [
             "FIREBASE_CREDENTIALS": "FIREBASE_CREDENTIALS",
         },
     },
+    {
+        # 小花火（Hanabiの小天地 bot）：指令由 Cloudflare Worker 回答，這裡只負責上線綠點
+        "name": "hanabi_presence",
+        "dir": os.path.join(BASE_DIR, "bots", "hanabi_presence"),
+        "cmd": [sys.executable, "main.py"],
+        "env_map": {
+            "DISCORD_TOKEN": "HANABI_DISCORD_TOKEN",
+        },
+    },
 ]
 
 
@@ -80,7 +89,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"3 bots supervised and running")
+        self.wfile.write(b"4 bots supervised and running")
 
     def do_HEAD(self):
         # UptimeRobot 免費方案預設用 HEAD 探測，這裡沒實作的話 BaseHTTPRequestHandler
