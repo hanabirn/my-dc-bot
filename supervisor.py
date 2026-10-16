@@ -43,12 +43,15 @@ BOTS = [
         },
     },
     {
-        # 小花火（Hanabiの小天地 bot）：指令由 Cloudflare Worker 回答，這裡只負責上線綠點
+        # 小花火（Hanabiの小天地 bot）：指令由 Cloudflare Worker 回答，這裡負責上線綠點，
+        # 以及「回覆小花火／@小花火」的聊天（轉給 Worker 的 /chat）
         "name": "hanabi_presence",
         "dir": os.path.join(BASE_DIR, "bots", "hanabi_presence"),
         "cmd": [sys.executable, "main.py"],
         "env_map": {
             "DISCORD_TOKEN": "HANABI_DISCORD_TOKEN",
+            "CHAT_URL": "HANABI_CHAT_URL",
+            "RELAY_TOKEN": "HANABI_RELAY_TOKEN",
         },
     },
 ]
